@@ -22,10 +22,12 @@ The goal of gbspatial is to provide functions useful for spatial transcriptomics
 
 ## Installation
 
-You can install the development version of gbspatial from [GitHub](https://github.com/) with:
+You can install the development version of gbspatial from [GitHub](https://github.com/gbarisano/gbspatial) with:
 
 ``` {r}
 #devtools::install_github("gbarisano/gbspatial")
+#OR
+#pak::pak("gbarisano/gbspatial")
 library(gbspatial)
 ```
 
