@@ -26,15 +26,14 @@ suppressPackageStartupMessages({
 #' @param out_dir The directory to save the PNG images. Defaults to current working directory.
 #' @param scale_length Length of the scale bar. Defaults to 0.1.
 #' @param scale_label Label for the scale bar. Defaults to "100 µm".
-#' @param img_dir Comma-separated list of directories (e.g., up to 4) containing background TMA images. Must match the number and order of images.
+#' @param img_dir Comma-separated list or vector of directories (e.g., up to 4) containing background TMA images. Must match the number and order of images.
 #' @param img_interval Interval for image raster mapping. Defaults to 0.5119157.
 #' @param alpha Transparency for polygons. Defaults to 0.4 if img_dir is used, otherwise 1.0.
-#' @param fov_pos_file Comma-separated list of paths to CosMx fov_positions_file.csv.gz. Must match the number and order of images.
-#' @param cells_show Comma-separated string of cell names to explicitly plot. Others will be ignored.
-#' @param cells_fill Comma-separated string of cell names to fill. Others will be drawn as empty polygons.
+#' @param fov_pos_file Comma-separated list or vector of paths to CosMx fov_positions_file.csv.gz. Must match the number and order of images.
+#' @param cells_show Comma-separated string or vector of cell names to explicitly plot. Others will be ignored.
+#' @param cells_fill Comma-separated string or vector of cell names to fill. Others will be drawn as empty polygons.
 #'
 #' @return Invisible NULL. Saves PNG files to the specified directory.
-#' @export
 PlotFOVSegmentation <- function(seurat_obj,
                                 fovs = NULL,
                                 fill = NULL,
@@ -52,9 +51,20 @@ PlotFOVSegmentation <- function(seurat_obj,
                                 cells_show = NULL,
                                 cells_fill = NULL) {
 
+  # Helper to handle parameters that can be a single comma-separated string OR a vector
+  parse_list_param <- function(param) {
+    if (is.null(param)) return(NULL)
+    # If it's a single string, assume it might be comma-separated and split it
+    if (length(param) == 1 && is.character(param)) {
+      return(trimws(unlist(strsplit(param, ","))))
+    }
+    # Otherwise, treat it as a vector and format appropriately
+    return(trimws(as.character(param)))
+  }
+
   # Parse cell subsets if provided
-  parsed_cells_show <- if (!is.null(cells_show)) trimws(unlist(strsplit(cells_show, ","))) else NULL
-  parsed_cells_fill <- if (!is.null(cells_fill)) trimws(unlist(strsplit(cells_fill, ","))) else NULL
+  parsed_cells_show <- parse_list_param(cells_show)
+  parsed_cells_fill <- parse_list_param(cells_fill)
 
   # 1. Determine target metadata and images
   actual_cols <- colnames(seurat_obj@meta.data)
@@ -77,14 +87,14 @@ PlotFOVSegmentation <- function(seurat_obj,
 
   # Prepare global target images
   if (!is.null(image_name)) {
-    image_name <- trimws(unlist(strsplit(image_name, ",")))
+    image_name <- parse_list_param(image_name)
   }
   global_target_images <- if (is.null(image_name)) Images(seurat_obj) else image_name
 
   # Load FOV positions files mappings
   fov_pos_data_list <- list()
   if (!is.null(fov_pos_file)) {
-    fov_pos_files <- trimws(unlist(strsplit(fov_pos_file, ",")))
+    fov_pos_files <- parse_list_param(fov_pos_file)
 
     # Handle convenience logic where 1 path is passed for all images
     if (length(fov_pos_files) == 1 && length(global_target_images) > 1) {
@@ -115,7 +125,7 @@ PlotFOVSegmentation <- function(seurat_obj,
   # Load TMA Background image directories mappings
   img_dir_list <- list()
   if (!is.null(img_dir)) {
-    img_dirs <- trimws(unlist(strsplit(img_dir, ",")))
+    img_dirs <- parse_list_param(img_dir)
 
     # Handle convenience logic where 1 path is passed for all images
     if (length(img_dirs) == 1 && length(global_target_images) > 1) {
@@ -140,12 +150,12 @@ PlotFOVSegmentation <- function(seurat_obj,
   # Store Idents explicitly so we can use it for subsetting if needed
   meta$seurat_ident <- as.character(Idents(seurat_obj))
 
-  # Parse the 'fill' parameter, which can now be 1 or 2 comma-separated values
+  # Parse the 'fill' parameter, which can now be 1 or 2 values
   if (is.null(fill)) {
     fill_col <- "seurat_ident"
     show_col <- "seurat_ident"
   } else {
-    fill_parts <- trimws(unlist(strsplit(fill, ",")))
+    fill_parts <- parse_list_param(fill)
     fill_col <- fill_parts[1]
     show_col <- if (length(fill_parts) > 1) fill_parts[2] else fill_col
   }
@@ -461,14 +471,13 @@ PlotFOVSegmentation <- function(seurat_obj,
         legend.title = element_text(color = "white"),
         legend.key = element_rect(fill = "black")
       )
-      print(p) #it does not slow-down the job on bash/command line, but it does slow down when launching on the R console in R studio because of the rendering of the image in the "Plots" window
 
       # 6. Save the plot
       filename <- file.path(out_dir, paste0("FOV_", current_fov, "_", img, "_segmentation.png"))
       ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black", dpi = 300)
       #filename <- file.path(out_dir, paste0("FOV_", current_fov, "_", img, "_segmentation.pdf"))
       #ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black")
-      #print(nrow(coords))
+      print(nrow(coords))
       message(paste("Saved:", filename))
     }
   }
