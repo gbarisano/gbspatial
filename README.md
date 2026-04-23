@@ -25,7 +25,6 @@ library(gbspatial)
 ### PlotFOVSegmentation
 
 ``` r
-source("R/PlotFOVSegmentation.R")
 PlotFOVSegmentation(seurat_obj = my_spatial_data,
                     fill = "updated_celltype",
                     img_dir= Sys.glob(file.path("data/DecodedFiles","*","*","CellStatsDir","CellComposite")),
@@ -52,6 +51,10 @@ PlotFOVSegmentation(seurat_obj = my_spatial_data,
     #> Not validating FOV objects
     #> Warning: Not validating Seurat objects
     #> Not validating Seurat objects
+    #> Warning in PlotFOVSegmentation(seurat_obj = my_spatial_data, fill =
+    #> "updated_celltype", : Could not find FOV 2 in the provided FOV position file
+    #> for TMA1 - Guessing the coordinates, which may lead to segmentations being
+    #> unaligned to the FOV image
 
 <img src="man/figures/README-unnamed-chunk-3-2.png" alt="" width="100%" />
 
@@ -64,6 +67,10 @@ PlotFOVSegmentation(seurat_obj = my_spatial_data,
     #> Not validating FOV objects
     #> Not validating FOV objects
     #> Warning: Not validating Seurat objects
+    #> Warning in PlotFOVSegmentation(seurat_obj = my_spatial_data, fill =
+    #> "updated_celltype", : Could not find FOV 1 in the provided FOV position file
+    #> for TMA2 - Guessing the coordinates, which may lead to segmentations being
+    #> unaligned to the FOV image
 
 <img src="man/figures/README-unnamed-chunk-3-3.png" alt="" width="100%" />
 

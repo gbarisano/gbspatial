@@ -32,7 +32,7 @@ suppressPackageStartupMessages({
 #' @param fov_pos_file Comma-separated list or vector of paths to CosMx fov_positions_file.csv.gz. Must match the number and order of images.
 #' @param cells_show Comma-separated string or vector of cell names to explicitly plot. Others will be ignored.
 #' @param cells_fill Comma-separated string or vector of cell names to fill. Others will be drawn as empty polygons.
-#'
+#' @importFrom dplyr %>%
 #' @return Invisible NULL. Saves PNG files to the specified directory.
 #' @export
 PlotFOVSegmentation <- function(seurat_obj,
@@ -348,6 +348,7 @@ PlotFOVSegmentation <- function(seurat_obj,
               y_max_raster <- as.numeric(fov_row[["y_global_mm"]][1])
               y_min_raster <- y_max_raster - img_interval
             } else {
+              warning(paste("Could not find FOV ", current_fov, "in the provided FOV position file for ", img, "- Guessing the coordinates, which may lead to segmentations being unaligned to the FOV image"))
               x_min_raster <- min(coords$x, na.rm = TRUE)
               y_min_raster <- min(coords$y, na.rm = TRUE)
               y_max_raster <- y_min_raster + img_interval

@@ -34,7 +34,6 @@ library(gbspatial)
 ### PlotFOVSegmentation
 
 ```{r}
-source("R/PlotFOVSegmentation.R")
 PlotFOVSegmentation(seurat_obj = my_spatial_data,
                     fill = "updated_celltype",
                     img_dir= Sys.glob(file.path("data/DecodedFiles","*","*","CellStatsDir","CellComposite")),
