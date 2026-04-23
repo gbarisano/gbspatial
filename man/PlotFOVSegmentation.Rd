@@ -31,7 +31,7 @@ If NULL, iterates through all unique FOVs found dynamically per image.}
 
 \item{fill}{A string indicating either a metadata column (e.g., "cell_type") or a color (e.g., "red").
 It can also be a comma-separated list of up to two columns: the first for fill mapping/filtering,
-the second specifically for show filtering. If NULL, defaults to Idents(seurat_obj).}
+the second specifically for show filtering. If NULL, defaults to Seurat::Idents(seurat_obj).}
 
 \item{image_name}{The name of the image slot(s) in the Seurat object. If NULL, automatically uses all available images for each FOV.}
 
