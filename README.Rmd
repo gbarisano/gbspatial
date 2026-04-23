@@ -40,4 +40,8 @@ PlotFOVSegmentation(seurat_obj = my_spatial_data,
                     img_dir= Sys.glob(file.path("data/DecodedFiles","*","*","CellStatsDir","CellComposite")),
                     fov_pos_file = Sys.glob(file.path("data/flatFiles", "*","*fov_positions_file.csv.gz")),
                     alpha=0.8)
+knitr::include_graphics("FOV_1_TMA1_segmentation.png")
+knitr::include_graphics("FOV_2_TMA1_segmentation.png")
+knitr::include_graphics("FOV_1_TMA2_segmentation.png")
+knitr::include_graphics("FOV_2_TMA2_segmentation.png")
 ```

@@ -79,3 +79,24 @@ PlotFOVSegmentation(seurat_obj = my_spatial_data,
 
     #> Saved: ./FOV_2_TMA2_segmentation.png
     #> Pipeline complete.
+    knitr::include_graphics("FOV_1_TMA1_segmentation.png")
+
+<img src="FOV_1_TMA1_segmentation.png" alt="" width="100%" />
+
+``` r
+knitr::include_graphics("FOV_2_TMA1_segmentation.png")
+```
+
+<img src="FOV_2_TMA1_segmentation.png" alt="" width="100%" />
+
+``` r
+knitr::include_graphics("FOV_1_TMA2_segmentation.png")
+```
+
+<img src="FOV_1_TMA2_segmentation.png" alt="" width="100%" />
+
+``` r
+knitr::include_graphics("FOV_2_TMA2_segmentation.png")
+```
+
+<img src="FOV_2_TMA2_segmentation.png" alt="" width="100%" />
