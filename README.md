@@ -13,10 +13,12 @@ transcriptomics data analysis.
 ## Installation
 
 You can install the development version of gbspatial from
-[GitHub](https://github.com/) with:
+[GitHub](https://github.com/gbarisano/gbspatial) with:
 
 ``` r
 #devtools::install_github("gbarisano/gbspatial")
+#OR
+#pak::pak("gbarisano/gbspatial")
 library(gbspatial)
 ```
 
