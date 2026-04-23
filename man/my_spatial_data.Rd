@@ -15,7 +15,7 @@ my_spatial_data
 }
 \description{
 A tiny Seurat object containing spatial transcriptomic data from Nanostring CosMx.
-It includes 4 Fields of View (FOVs) across 4 Tissue Microarrays (TMAs).
+It includes 2 Fields of View (FOVs) across 2 Tissue Microarrays (TMAs).
 Useful for testing the package's spatial functions.
 }
 \details{

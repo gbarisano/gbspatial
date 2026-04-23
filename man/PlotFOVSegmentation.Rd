@@ -47,17 +47,17 @@ the second specifically for show filtering. If NULL, defaults to Idents(seurat_o
 
 \item{scale_label}{Label for the scale bar. Defaults to "100 µm".}
 
-\item{img_dir}{Comma-separated list of directories (e.g., up to 4) containing background TMA images. Must match the number and order of images.}
+\item{img_dir}{Comma-separated list or vector of directories (e.g., up to 4) containing background TMA images. Must match the number and order of images.}
 
 \item{img_interval}{Interval for image raster mapping. Defaults to 0.5119157.}
 
 \item{alpha}{Transparency for polygons. Defaults to 0.4 if img_dir is used, otherwise 1.0.}
 
-\item{fov_pos_file}{Comma-separated list of paths to CosMx fov_positions_file.csv.gz. Must match the number and order of images.}
+\item{fov_pos_file}{Comma-separated list or vector of paths to CosMx fov_positions_file.csv.gz. Must match the number and order of images.}
 
-\item{cells_show}{Comma-separated string of cell names to explicitly plot. Others will be ignored.}
+\item{cells_show}{Comma-separated string or vector of cell names to explicitly plot. Others will be ignored.}
 
-\item{cells_fill}{Comma-separated string of cell names to fill. Others will be drawn as empty polygons.}
+\item{cells_fill}{Comma-separated string or vector of cell names to fill. Others will be drawn as empty polygons.}
 }
 \value{
 Invisible NULL. Saves PNG files to the specified directory.
