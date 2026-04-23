@@ -34,6 +34,7 @@ suppressPackageStartupMessages({
 #' @param cells_fill Comma-separated string or vector of cell names to fill. Others will be drawn as empty polygons.
 #'
 #' @return Invisible NULL. Saves PNG files to the specified directory.
+#' @export
 PlotFOVSegmentation <- function(seurat_obj,
                                 fovs = NULL,
                                 fill = NULL,
