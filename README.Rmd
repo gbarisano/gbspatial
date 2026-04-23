@@ -1,0 +1,43 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%"
+)
+```
+
+# gbspatial
+
+<!-- badges: start -->
+<!-- badges: end -->
+
+The goal of gbspatial is to provide functions useful for spatial transcriptomics data analysis.
+
+## Installation
+
+You can install the development version of gbspatial from [GitHub](https://github.com/) with:
+
+``` {r}
+#devtools::install_github("gbarisano/gbspatial")
+library(gbspatial)
+```
+
+## Examples
+
+### PlotFOVSegmentation
+
+```{r}
+source("R/PlotFOVSegmentation.R")
+PlotFOVSegmentation(seurat_obj = my_spatial_data,
+                    fill = "updated_celltype",
+                    img_dir= Sys.glob(file.path("data/DecodedFiles","*","*","CellStatsDir","CellComposite")),
+                    fov_pos_file = Sys.glob(file.path("data/flatFiles", "*","*fov_positions_file.csv.gz")),
+                    alpha=0.8)
+```
