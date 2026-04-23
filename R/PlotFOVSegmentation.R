@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 
-# Load required libraries
+# Load required libraries if ran on terminal through Rscript
 suppressPackageStartupMessages({
   library(optparse)
   library(Seurat)
@@ -18,7 +18,7 @@ suppressPackageStartupMessages({
 #'             If NULL, iterates through all unique FOVs found dynamically per image.
 #' @param fill A string indicating either a metadata column (e.g., "cell_type") or a color (e.g., "red").
 #'             It can also be a comma-separated list of up to two columns: the first for fill mapping/filtering,
-#'             the second specifically for show filtering. If NULL, defaults to Idents(seurat_obj).
+#'             the second specifically for show filtering. If NULL, defaults to Seurat::Idents(seurat_obj).
 #' @param image_name The name of the image slot(s) in the Seurat object. If NULL, automatically uses all available images for each FOV.
 #' @param fov_col The name of the metadata column that contains the FOV indices. Defaults to "fov".
 #' @param img_col The name of the metadata column linking cells to their specific image. Defaults to "Run_Tissue_name".
@@ -89,7 +89,7 @@ PlotFOVSegmentation <- function(seurat_obj,
   if (!is.null(image_name)) {
     image_name <- parse_list_param(image_name)
   }
-  global_target_images <- if (is.null(image_name)) Images(seurat_obj) else image_name
+  global_target_images <- if (is.null(image_name)) Seurat::Images(seurat_obj) else image_name
 
   # Load FOV positions files mappings
   fov_pos_data_list <- list()
@@ -148,7 +148,7 @@ PlotFOVSegmentation <- function(seurat_obj,
   meta$cell <- rownames(meta)
 
   # Store Idents explicitly so we can use it for subsetting if needed
-  meta$seurat_ident <- as.character(Idents(seurat_obj))
+  meta$seurat_ident <- as.character(Seurat::Idents(seurat_obj))
 
   # Parse the 'fill' parameter, which can now be 1 or 2 values
   if (is.null(fill)) {
@@ -217,7 +217,7 @@ PlotFOVSegmentation <- function(seurat_obj,
 
   # 3. Iterate over each Image FIRST, then the FOVs corresponding to that image
   for (img in global_target_images) {
-    if (!img %in% Images(seurat_obj)) {
+    if (!img %in% Seurat::Images(seurat_obj)) {
       warning(paste("Image", img, "not found in Seurat object - Skipping."))
       next
     }
@@ -233,10 +233,10 @@ PlotFOVSegmentation <- function(seurat_obj,
       img_cells <- rownames(meta)[which(meta[[img_col]] == img)]
       if (length(img_cells) == 0) {
         warning(paste("No cells found for image", img, "using metadata column '", img_col, "'. Falling back to Seurat Cells()."))
-        img_cells <- Cells(seurat_obj[[img]])
+        img_cells <- Seurat::Cells(seurat_obj[[img]])
       }
     } else {
-      img_cells <- Cells(seurat_obj[[img]])
+      img_cells <- Seurat::Cells(seurat_obj[[img]])
     }
 
     # Apply cells_show filter if specified
@@ -271,7 +271,7 @@ PlotFOVSegmentation <- function(seurat_obj,
         next
       }
 
-      # Subset Seurat object using exact cell names
+      # Subset Seurat object using exact cell names (base R subset, compatible with Seurat)
       sub_obj <- tryCatch({
         subset(seurat_obj, cells = fov_cells)
       }, error = function(e) {
@@ -280,15 +280,15 @@ PlotFOVSegmentation <- function(seurat_obj,
       })
 
       # Verify subset has data for the specific image
-      if (is.null(sub_obj) || length(Cells(sub_obj)) == 0 || !img %in% Images(sub_obj)) {
+      if (is.null(sub_obj) || length(Seurat::Cells(sub_obj)) == 0 || !img %in% Seurat::Images(sub_obj)) {
         warning(paste("FOV", current_fov, "subset is empty or missing image", img, "- Skipping."))
         next
       }
 
-      DefaultBoundary(sub_obj[[img]]) <- boundary
+      SeuratObject::DefaultBoundary(sub_obj[[img]]) <- boundary
 
       coords <- tryCatch({
-        GetTissueCoordinates(sub_obj[[img]])
+        Seurat::GetTissueCoordinates(sub_obj[[img]])
       }, error = function(e) data.frame())
 
       if (nrow(coords) == 0) {
@@ -300,7 +300,7 @@ PlotFOVSegmentation <- function(seurat_obj,
       coords$vertex_order <- seq_len(nrow(coords))
 
       coords <- coords %>%
-        dplyr::left_join(meta %>% select(-c(x,y)), by = "cell") %>%
+        dplyr::left_join(meta %>% dplyr::select(-c(x,y)), by = "cell") %>%
         dplyr::arrange(vertex_order)
 
       # 4. Determine plot boundaries
@@ -389,16 +389,16 @@ PlotFOVSegmentation <- function(seurat_obj,
       }
 
       # 5. Build the ggplot (Initialize without global data)
-      p <- ggplot()
+      p <- ggplot2::ggplot()
 
       # Add Raster Image if requested
       if (has_img) {
         img_raster <- as.raster(jpeg::readJPEG(tma_img_path))
-        p <- p + annotation_raster(img_raster,
-                                   xmin = plot_xlim[1],
-                                   xmax = plot_xlim[2],
-                                   ymin = plot_ylim[1],
-                                   ymax = plot_ylim[2])
+        p <- p + ggplot2::annotation_raster(img_raster,
+                                            xmin = plot_xlim[1],
+                                            xmax = plot_xlim[2],
+                                            ymin = plot_ylim[1],
+                                            ymax = plot_ylim[2])
       }
 
       # Apply variable fill vs static color, factoring in cells_fill option
@@ -408,76 +408,78 @@ PlotFOVSegmentation <- function(seurat_obj,
 
         # Add background (empty) cells first
         if (nrow(coords_empty) > 0) {
-          p <- p + geom_polygon(data = coords_empty, aes(x = x, y = y, group = cell),
-                                fill = NA, color = "white", linewidth = 0.1, alpha = poly_alpha)
+          p <- p + ggplot2::geom_polygon(data = coords_empty, ggplot2::aes(x = x, y = y, group = cell),
+                                         fill = NA, color = "white", linewidth = 0.1, alpha = poly_alpha)
         }
 
         # Add foreground (filled) cells over the background
         if (nrow(coords_fill) > 0) {
           if (is_fill_col) {
-            p <- p + geom_polygon(data = coords_fill, aes(x = x, y = y, group = cell, fill = .data[[fill_col]]),
-                                  color = "white", linewidth = 0.1, alpha = poly_alpha)
+            p <- p + ggplot2::geom_polygon(data = coords_fill, ggplot2::aes(x = x, y = y, group = cell, fill = .data[[fill_col]]),
+                                           color = "white", linewidth = 0.1, alpha = poly_alpha)
           } else {
-            p <- p + geom_polygon(data = coords_fill, aes(x = x, y = y, group = cell),
-                                  fill = fill_col, color = "white", linewidth = 0.1, alpha = poly_alpha)
+            p <- p + ggplot2::geom_polygon(data = coords_fill, ggplot2::aes(x = x, y = y, group = cell),
+                                           fill = fill_col, color = "white", linewidth = 0.1, alpha = poly_alpha)
           }
         }
       } else {
         # Standard plotting all cells normally
         if (is_fill_col) {
-          p <- p + geom_polygon(data = coords, aes(x = x, y = y, group = cell, fill = .data[[fill_col]]),
-                                color = "white", linewidth = 0.1, alpha = poly_alpha)
+          p <- p + ggplot2::geom_polygon(data = coords, ggplot2::aes(x = x, y = y, group = cell, fill = .data[[fill_col]]),
+                                         color = "white", linewidth = 0.1, alpha = poly_alpha)
         } else {
-          p <- p + geom_polygon(data = coords, aes(x = x, y = y, group = cell),
-                                fill = fill_col, color = "white", linewidth = 0.1, alpha = poly_alpha)
+          p <- p + ggplot2::geom_polygon(data = coords, ggplot2::aes(x = x, y = y, group = cell),
+                                         fill = fill_col, color = "white", linewidth = 0.1, alpha = poly_alpha)
         }
       }
 
       # Ensure identical colors are mapped identically across all FOV plots
       if (is_fill_col && !is.null(global_color_map)) {
-        p <- p + scale_fill_manual(values = global_color_map, name = fill_col)
+        p <- p + ggplot2::scale_fill_manual(values = global_color_map, name = fill_col)
       }
 
       # Add customizations and theme
       p <- p +
-        annotate("segment", x = x_start, xend = x_end, y = y_pos, yend = y_pos,
-                 color = "white", linewidth = 1.5) +
-        annotate("text", x = x_start + (scale_length / 2), y = y_text_pos,
-                 label = scale_label, color = "white", size = 4, fontface = "bold") +
-        labs(title = paste("FOV:", current_fov, "| Image:", img))
+        ggplot2::annotate("segment", x = x_start, xend = x_end, y = y_pos, yend = y_pos,
+                          color = "white", linewidth = 1.5) +
+        ggplot2::annotate("text", x = x_start + (scale_length / 2), y = y_text_pos,
+                          label = scale_label, color = "white", size = 4, fontface = "bold") +
+        ggplot2::labs(title = paste("FOV:", current_fov, "| Image:", img))
 
       # Strict geometry clipping
       if (has_img) {
         # Restrict viewport exactly to the raster image bounds
-        p <- p + coord_equal(xlim = plot_xlim, ylim = plot_ylim, expand = FALSE)
+        p <- p + ggplot2::coord_equal(xlim = plot_xlim, ylim = plot_ylim, expand = FALSE)
       } else {
-        p <- p + coord_equal()
+        p <- p + ggplot2::coord_equal()
       }
 
-      p <- p + theme(
-        panel.background = element_rect(fill = "black", color = "black"),
-        plot.background = element_rect(fill = "black", color = "black"),
-        plot.title = element_text(color = "white", hjust = 0.5, size = 16),
-        axis.line = element_blank(),
-        axis.text.x = element_blank(),
-        axis.text.y = element_blank(),
-        axis.ticks = element_blank(),
-        axis.title.x = element_blank(),
-        axis.title.y = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        legend.background = element_rect(fill = "black"),
-        legend.text = element_text(color = "white"),
-        legend.title = element_text(color = "white"),
-        legend.key = element_rect(fill = "black")
+      p <- p + ggplot2::theme(
+        panel.background = ggplot2::element_rect(fill = "black", color = "black"),
+        plot.background = ggplot2::element_rect(fill = "black", color = "black"),
+        plot.title = ggplot2::element_text(color = "white", hjust = 0.5, size = 16),
+        axis.line = ggplot2::element_blank(),
+        axis.text.x = ggplot2::element_blank(),
+        axis.text.y = ggplot2::element_blank(),
+        axis.ticks = ggplot2::element_blank(),
+        axis.title.x = ggplot2::element_blank(),
+        axis.title.y = ggplot2::element_blank(),
+        panel.grid.major = ggplot2::element_blank(),
+        panel.grid.minor = ggplot2::element_blank(),
+        legend.background = ggplot2::element_rect(fill = "black"),
+        legend.text = ggplot2::element_text(color = "white"),
+        legend.title = ggplot2::element_text(color = "white"),
+        legend.key = ggplot2::element_rect(fill = "black")
       )
+      print(p) #it does not slow-down the job on bash/command line, but it does slow down when launching on the R console in R studio because of the rendering of the image in the "Plots" window
+      #it will create a file Rplots.pdf where all plots will be visible.
 
       # 6. Save the plot
       filename <- file.path(out_dir, paste0("FOV_", current_fov, "_", img, "_segmentation.png"))
-      ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black", dpi = 300)
+      ggplot2::ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black", dpi = 300)
       #filename <- file.path(out_dir, paste0("FOV_", current_fov, "_", img, "_segmentation.pdf"))
-      #ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black")
-      print(nrow(coords))
+      #ggplot2::ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black")
+      #print(nrow(coords))
       message(paste("Saved:", filename))
     }
   }
@@ -492,47 +494,47 @@ PlotFOVSegmentation <- function(seurat_obj,
 # sys.nframe() == 0 checks if the script is being executed directly from the terminal
 if (sys.nframe() == 0) {
   option_list = list(
-    make_option(c("-i", "--input"), type="character", default=NULL,
-                help="Path to the input Seurat object (.rds file)", metavar="character"),
-    make_option(c("-f", "--fovs"), type="character", default=NULL,
-                help="Comma-separated list of FOVs or intervals to plot (e.g., '1,2,5:10'). If NULL, plots all.", metavar="character"),
-    make_option(c("-c", "--fill"), type="character", default=NULL,
-                help="Metadata column name(s) or static color for cell fill. Can be comma-separated: 'fill_col,show_col'. Defaults to Idents.", metavar="character"),
-    make_option(c("-m", "--image_name"), type="character", default=NULL,
-                help="Name of the image slot. If NULL, uses all available.", metavar="character"),
-    make_option(c("-v", "--fov_col"), type="character", default="fov",
-                help="Metadata column containing FOV indices [default= %default]", metavar="character"),
-    make_option(c("-g", "--img_col"), type="character", default="Run_Tissue_name",
-                help="Metadata column linking cells to their specific image [default= %default]", metavar="character"),
-    make_option(c("-b", "--boundary"), type="character", default="segmentation",
-                help="Segmentation boundary to use (e.g. 'segmentation', 'centroids') [default= %default]", metavar="character"),
-    make_option(c("-o", "--out_dir"), type="character", default=".",
-                help="Output directory [default= %default]", metavar="character"),
-    make_option(c("-s", "--scale_length"), type="numeric", default=0.1,
-                help="Length of the scale bar [default= %default]", metavar="numeric"),
-    make_option(c("-l", "--scale_label"), type="character", default="100 µm",
-                help="Label for the scale bar [default= %default]", metavar="character"),
-    make_option(c("-d", "--img_dir"), type="character", default=NULL,
-                help="Comma-separated directories containing TMA images for background overlay.", metavar="character"),
-    make_option(c("-t", "--img_interval"), type="numeric", default=0.5119157,
-                help="Interval for the spatial extent of the overlaid image [default= %default]", metavar="numeric"),
-    make_option(c("-a", "--alpha"), type="numeric", default=NULL,
-                help="Alpha transparency for polygons. Defaults to 0.4 if img_dir is provided, else 1.0.", metavar="numeric"),
-    make_option(c("-P", "--fov_pos_file"), type="character", default=NULL,
-                help="Comma-separated paths to fov_positions_file.csv.gz. Must match the number and order of images.", metavar="character"),
-    make_option(c("-S", "--cells_show"), type="character", default=NULL,
-                help="Comma-separated string of cell names to explicitly plot. Others will not be drawn.", metavar="character"),
-    make_option(c("-F", "--cells_fill"), type="character", default=NULL,
-                help="Comma-separated string of cell names to fill. Others will be drawn as empty grey polygons.", metavar="character"),
-    make_option(c("-q", "--subset"), type="character", default=NULL,
-                help="Logical expression to subset cells (e.g., 'nCount_RNA > 20'). Variables must exist in metadata.", metavar="character")
+    optparse::make_option(c("-i", "--input"), type="character", default=NULL,
+                          help="Path to the input Seurat object (.rds file)", metavar="character"),
+    optparse::make_option(c("-f", "--fovs"), type="character", default=NULL,
+                          help="Comma-separated list of FOVs or intervals to plot (e.g., '1,2,5:10'). If NULL, plots all.", metavar="character"),
+    optparse::make_option(c("-c", "--fill"), type="character", default=NULL,
+                          help="Metadata column name(s) or static color for cell fill. Can be comma-separated: 'fill_col,show_col'. Defaults to Idents.", metavar="character"),
+    optparse::make_option(c("-m", "--image_name"), type="character", default=NULL,
+                          help="Name of the image slot. If NULL, uses all available.", metavar="character"),
+    optparse::make_option(c("-v", "--fov_col"), type="character", default="fov",
+                          help="Metadata column containing FOV indices [default= %default]", metavar="character"),
+    optparse::make_option(c("-g", "--img_col"), type="character", default="Run_Tissue_name",
+                          help="Metadata column linking cells to their specific image [default= %default]", metavar="character"),
+    optparse::make_option(c("-b", "--boundary"), type="character", default="segmentation",
+                          help="Segmentation boundary to use (e.g. 'segmentation', 'centroids') [default= %default]", metavar="character"),
+    optparse::make_option(c("-o", "--out_dir"), type="character", default=".",
+                          help="Output directory [default= %default]", metavar="character"),
+    optparse::make_option(c("-s", "--scale_length"), type="numeric", default=0.1,
+                          help="Length of the scale bar [default= %default]", metavar="numeric"),
+    optparse::make_option(c("-l", "--scale_label"), type="character", default="100 µm",
+                          help="Label for the scale bar [default= %default]", metavar="character"),
+    optparse::make_option(c("-d", "--img_dir"), type="character", default=NULL,
+                          help="Comma-separated directories containing TMA images for background overlay.", metavar="character"),
+    optparse::make_option(c("-t", "--img_interval"), type="numeric", default=0.5119157,
+                          help="Interval for the spatial extent of the overlaid image [default= %default]", metavar="numeric"),
+    optparse::make_option(c("-a", "--alpha"), type="numeric", default=NULL,
+                          help="Alpha transparency for polygons. Defaults to 0.4 if img_dir is provided, else 1.0.", metavar="numeric"),
+    optparse::make_option(c("-P", "--fov_pos_file"), type="character", default=NULL,
+                          help="Comma-separated paths to fov_positions_file.csv.gz. Must match the number and order of images.", metavar="character"),
+    optparse::make_option(c("-S", "--cells_show"), type="character", default=NULL,
+                          help="Comma-separated string of cell names to explicitly plot. Others will not be drawn.", metavar="character"),
+    optparse::make_option(c("-F", "--cells_fill"), type="character", default=NULL,
+                          help="Comma-separated string of cell names to fill. Others will be drawn as empty grey polygons.", metavar="character"),
+    optparse::make_option(c("-q", "--subset"), type="character", default=NULL,
+                          help="Logical expression to subset cells (e.g., 'nCount_RNA > 20'). Variables must exist in metadata.", metavar="character")
   )
 
-  opt_parser = OptionParser(option_list=option_list)
-  opt = parse_args(opt_parser)
+  opt_parser = optparse::OptionParser(option_list=option_list)
+  opt = optparse::parse_args(opt_parser)
 
   if (is.null(opt$input)){
-    print_help(opt_parser)
+    optparse::print_help(opt_parser)
     stop("Input Seurat object file path must be provided (-i/--input).", call.=FALSE)
   }
 
@@ -554,7 +556,7 @@ if (sys.nframe() == 0) {
     req_vars <- all.vars(expr)
 
     # Verify all required variables exist in the Seurat metadata
-    missing_vars <- setdiff(req_vars, colnames(seurat_obj@meta.data))
+    missing_vars <- dplyr::setdiff(req_vars, colnames(seurat_obj@meta.data))
     if (length(missing_vars) > 0) {
       stop(paste("Error: The following variables used in your --subset expression were not found in the Seurat object metadata:\n",
                  paste(missing_vars, collapse = ", ")))
