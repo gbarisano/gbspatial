@@ -17,3 +17,5 @@ Imports:
     Polychrome,
     Seurat,
     tibble
+URL: https://github.com/gbarisano/gbspatial
+BugReports: https://github.com/gbarisano/gbspatial/issues
