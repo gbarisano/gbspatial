@@ -477,7 +477,7 @@ PlotFOVSegmentation <- function(seurat_obj,
       #it will create a file Rplots.pdf where all plots will be visible.
 
       # 6. Save the plot
-      filename <- file.path(out_dir, paste0("FOV_", current_fov, "_", img, "_segmentation.png"))
+      filename <- file.path(out_dir, paste0(img,"_FOV_", current_fov, img, "_segmentation.png"))
       ggplot2::ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black", dpi = 300)
       #filename <- file.path(out_dir, paste0("FOV_", current_fov, "_", img, "_segmentation.pdf"))
       #ggplot2::ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black")
