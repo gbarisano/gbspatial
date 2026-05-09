@@ -1,5 +1,5 @@
 # Copyright ©2024 Bruker Spatial Biology, Inc. All rights reserved. Subject to additional license terms and conditions provided separately by Bruker Spatial Biology, Inc.
-#' Arrange tissues in xy space to reduce whitespace 
+#' Arrange tissues in xy space to reduce whitespace
 #' 
 #' Uses a shelf algorithm: places tallest tissues on the bottom shelf, and so on. 
 #'
@@ -127,7 +127,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
     
     tempdatatable <- data.table::fread(file.path(current_path, thisslidesmetadata))
     
-    # FIX: Use base R assignment instead of data.table := to avoid namespace errors
+    # Use base R assignment instead of data.table := to avoid namespace errors
     tempdatatable$slidename <- slidename
     
     # numeric slide ID 
@@ -180,8 +180,11 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       skiprows <- skiprows + chunk_size
       slide_fov_cell_counts <- paste0("c_", slide_ID_numeric, "_", countsdatatable$fov, "_", countsdatatable$cell_ID)
       
+      # FIX: Define columns to keep by subtracting fov and cell_ID safely
+      cols_to_keep <- setdiff(colnames(countsdatatable), c("fov", "cell_ID"))
+      
       # Convert to sparseMatrix
-      sub_counts_matrix[[chunkid]] <- as(countsdatatable[, -c("fov", "cell_ID"), with = FALSE], "sparseMatrix") 
+      sub_counts_matrix[[chunkid]] <- as(countsdatatable[, cols_to_keep, with = FALSE], "sparseMatrix") 
       rownames(sub_counts_matrix[[chunkid]]) <- slide_fov_cell_counts 
       
       setTxtProgressBar(pb, chunkid)
