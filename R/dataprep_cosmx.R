@@ -82,7 +82,7 @@ condenseTissues <- function(xy, tissue, tissueorder = NULL, buffer = 0.2, widthh
 #' @param myflatfiledir A character vector of one or more directories containing CosMx slide folders.
 #' @param plot_tissues Logical. If TRUE, plots the condensed tissue layouts. Default is FALSE.
 #' @return A list containing `"counts"`, `"negcounts"`, `"falsecounts"`, `"metadata"`, and `"xy"`.
-#' @importFrom data.table fread rbindlist :=
+#' @importFrom data.table fread rbindlist
 #' @importFrom Matrix sparseMatrix
 #' @importFrom methods as
 #' @importFrom utils txtProgressBar setTxtProgressBar
@@ -126,12 +126,14 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
     if (length(thisslidesmetadata) == 0) stop(paste("No metadata file found for", slidename))
     
     tempdatatable <- data.table::fread(file.path(current_path, thisslidesmetadata))
-    tempdatatable[, slidename := slidename]
+    
+    # FIX: Use base R assignment instead of data.table := to avoid namespace errors
+    tempdatatable$slidename <- slidename
     
     # numeric slide ID 
     slide_ID_numeric <- tempdatatable[1,]$slide_ID 
     
-    # global cell ID (fixed logic to preserve cell ID mapping before removing it later)
+    # global cell ID 
     tempdatatable$global_cell_ID <- paste0("c_", slide_ID_numeric, "_", tempdatatable$fov, "_", tempdatatable$cell_ID)
     
     # load in counts as a data table:
