@@ -180,11 +180,11 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       skiprows <- skiprows + chunk_size
       slide_fov_cell_counts <- paste0("c_", slide_ID_numeric, "_", countsdatatable$fov, "_", countsdatatable$cell_ID)
       
-      # FIX: Define columns to keep by subtracting fov and cell_ID safely
+      # Define columns to keep by subtracting fov and cell_ID safely
       cols_to_keep <- setdiff(colnames(countsdatatable), c("fov", "cell_ID"))
       
-      # Convert to sparseMatrix
-      sub_counts_matrix[[chunkid]] <- as(countsdatatable[, cols_to_keep, with = FALSE], "sparseMatrix") 
+      # FIX: Coerce data.table to matrix first, then to sparseMatrix
+      sub_counts_matrix[[chunkid]] <- as(as.matrix(countsdatatable[, cols_to_keep, with = FALSE]), "sparseMatrix") 
       rownames(sub_counts_matrix[[chunkid]]) <- slide_fov_cell_counts 
       
       setTxtProgressBar(pb, chunkid)
