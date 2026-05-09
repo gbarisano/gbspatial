@@ -83,7 +83,7 @@ condenseTissues <- function(xy, tissue, tissueorder = NULL, buffer = 0.2, widthh
 #' @param plot_tissues Logical. If TRUE, plots the condensed tissue layouts. Default is FALSE.
 #' @return A list containing `"counts"`, `"negcounts"`, `"falsecounts"`, `"metadata"`, and `"xy"`.
 #' @importFrom data.table fread rbindlist
-#' @importFrom Matrix sparseMatrix
+#' @importFrom Matrix Matrix
 #' @importFrom methods as
 #' @importFrom utils txtProgressBar setTxtProgressBar
 #' @importFrom graphics plot text
@@ -183,8 +183,10 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       # Define columns to keep by subtracting fov and cell_ID safely
       cols_to_keep <- setdiff(colnames(countsdatatable), c("fov", "cell_ID"))
       
-      # FIX: Coerce data.table to matrix first, then specifically to "dgCMatrix"
-      sub_counts_matrix[[chunkid]] <- as(as.matrix(countsdatatable[, cols_to_keep, with = FALSE]), "dgCMatrix") 
+      # FIX: Create base matrix, enforce numeric mode, and use Matrix() constructor
+      dense_mat <- as.matrix(countsdatatable[, cols_to_keep, with = FALSE])
+      mode(dense_mat) <- "numeric"
+      sub_counts_matrix[[chunkid]] <- Matrix::Matrix(dense_mat, sparse = TRUE)
       rownames(sub_counts_matrix[[chunkid]]) <- slide_fov_cell_counts 
       
       setTxtProgressBar(pb, chunkid)
