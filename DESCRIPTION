@@ -1,5 +1,5 @@
 Package: gbspatial
-Title: What the Package Does (One Line, Title Case)
+Title: A set of functions for spatial transcriptomic data 
 Version: 0.0.0.9000
 Authors@R: 
     person("Giuseppe", "Barisano", , "first.last@example.com", role = c("aut", "cre"))
