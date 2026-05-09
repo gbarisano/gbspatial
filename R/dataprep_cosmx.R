@@ -183,8 +183,8 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       # Define columns to keep by subtracting fov and cell_ID safely
       cols_to_keep <- setdiff(colnames(countsdatatable), c("fov", "cell_ID"))
       
-      # FIX: Coerce data.table to matrix first, then to sparseMatrix
-      sub_counts_matrix[[chunkid]] <- as(as.matrix(countsdatatable[, cols_to_keep, with = FALSE]), "sparseMatrix") 
+      # FIX: Coerce data.table to matrix first, then specifically to "dgCMatrix"
+      sub_counts_matrix[[chunkid]] <- as(as.matrix(countsdatatable[, cols_to_keep, with = FALSE]), "dgCMatrix") 
       rownames(sub_counts_matrix[[chunkid]]) <- slide_fov_cell_counts 
       
       setTxtProgressBar(pb, chunkid)
