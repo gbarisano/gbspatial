@@ -2,4 +2,5 @@
 
 export(PlotFOVSegmentation)
 export(assign_fovs_to_cores)
+export(dataprep_cosmx)
 importFrom(dplyr,"%>%")
