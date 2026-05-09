@@ -362,8 +362,8 @@ run_spatial_qc <- function(counts,
                            do_FOV_boundary = TRUE, SplitRatioToLocalThreshold = 0.5,
                            do_regional = TRUE, bandwidth = 0.010, weight_cutoff = 0.080) {
   
-  # Ensure required libraries are available
-  required_pkgs <- c("ggplot2", "dplyr", "patchwork", "dbscan", "Matrix", "UpSetR", "purrr", "FNN", "pheatmap", "scales")
+  # Ensure required libraries are available (added 'grid' to the check, though it is base R)
+  required_pkgs <- c("ggplot2", "dplyr", "patchwork", "dbscan", "Matrix", "UpSetR", "purrr", "FNN", "pheatmap", "scales", "grid")
   missing_pkgs <- required_pkgs[!(required_pkgs %in% installed.packages()[,"Package"])]
   if(length(missing_pkgs)) stop("Missing required packages: ", paste(missing_pkgs, collapse = ", "))
   
@@ -519,9 +519,29 @@ run_spatial_qc <- function(counts,
   filter_list <- purrr::keep(filter_list, ~ length(.) > 0)
   
   if (length(filter_list) > 1) {
-    plots$upset_plot <- recordPlot(
-      UpSetR::upset(UpSetR::fromList(filter_list), nintersects = 10, order.by = "freq", nsets = length(filter_list), text.scale = 1.5)
-    )
+    # 1. Create the UpSet plot
+    u_plot <- UpSetR::upset(UpSetR::fromList(filter_list), nintersects = 10, order.by = "freq", nsets = length(filter_list), text.scale = 1.5)
+    
+    # 2. Create the Overall Flagged Pie Chart
+    pie_data_overall <- data.frame(Category = dplyr::if_else(flag_table$flag_overall, "Flagged", "Kept")) %>%
+      dplyr::count(Category) %>%
+      dplyr::mutate(
+        Percentage = (n / sum(n)) * 100, 
+        Label = paste0(Category, "\n(", round(Percentage, 1), "%)")
+      )
+    
+    p_pie_overall <- ggplot2::ggplot(pie_data_overall, ggplot2::aes(x = 2, y = n, fill = Category)) +
+      ggplot2::geom_bar(stat = "identity", width = 1, color = "white") +
+      ggplot2::coord_polar("y", start = 0) +
+      ggplot2::scale_fill_manual(values = c("Flagged" = "#D73027", "Kept" = "gray90")) +
+      ggplot2::geom_text(ggplot2::aes(label = Label), position = ggplot2::position_stack(vjust = 0.5), size = 3.5, fontface = "bold") +
+      ggplot2::theme_void() +
+      ggplot2::xlim(0.5, 2.5) + 
+      ggplot2::theme(legend.position = "none")
+    
+    # 3. Combine UpSet and Pie Chart using grid.grabExpr and patchwork
+    plots$upset_plot <- patchwork::wrap_elements(grid::grid.grabExpr(print(u_plot))) +
+      patchwork::inset_element(p_pie_overall, left = 0.65, bottom = 0.65, right = 1.0, top = 1.0)
   }
   
   # --- 7. Subset and Return ---
@@ -531,7 +551,7 @@ run_spatial_qc <- function(counts,
     counts = counts[keep_idx, , drop = FALSE],
     metadata = metadata[keep_idx, , drop = FALSE],
     xy = if(!is.null(xy)) xy[keep_idx, , drop = FALSE] else NULL,
-    negcounts = if(!is.null(negcounts)) negcounts[keep_idx, , drop = FALSE] else NULL, # Filtered negcounts added here
+    negcounts = if(!is.null(negcounts)) negcounts[keep_idx, , drop = FALSE] else NULL,
     flag_table = flag_table,
     plots = plots
   ))
