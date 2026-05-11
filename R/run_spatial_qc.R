@@ -362,7 +362,7 @@ run_spatial_qc <- function(counts,
                            do_FOV_boundary = TRUE, SplitRatioToLocalThreshold = 0.5,
                            do_regional = TRUE, bandwidth = 0.010, weight_cutoff = 0.080) {
   
-  # Ensure required libraries are available (added 'grid' to the check, though it is base R)
+  # Ensure required libraries are available
   required_pkgs <- c("ggplot2", "dplyr", "patchwork", "dbscan", "Matrix", "UpSetR", "purrr", "FNN", "pheatmap", "scales", "grid")
   missing_pkgs <- required_pkgs[!(required_pkgs %in% installed.packages()[,"Package"])]
   if(length(missing_pkgs)) stop("Missing required packages: ", paste(missing_pkgs, collapse = ", "))
@@ -409,9 +409,9 @@ run_spatial_qc <- function(counts,
     if (is.null(xy)) stop("xy coordinates are required when do_runfovqc = TRUE.")
     message("Running FOV-level QC...")
     
-    allbarcodes <- readRDS(url("https://github.com/Nanostring-Biostats/CosMx-Analysis-Scratch-Space/raw/Main/_code/FOV%20QC/barcodes_by_panel.RDS"))
-    if(!panel_name %in% names(allbarcodes)) stop("Panel name not found in barcodes list.")
-    barcodemap <- allbarcodes[[panel_name]]
+    # Use the internal package data instead of reading from URL
+    if(!panel_name %in% names(barcodes_by_panel)) stop("Panel name not found in barcodes list. Ensure 'barcodes_by_panel' is loaded.")
+    barcodemap <- barcodes_by_panel[[panel_name]]
     
     fovqcresult <- runFOVQC(counts = counts, xy = xy, fov = metadata$FOV, 
                             barcodemap = barcodemap, 
@@ -519,10 +519,8 @@ run_spatial_qc <- function(counts,
   filter_list <- purrr::keep(filter_list, ~ length(.) > 0)
   
   if (length(filter_list) > 1) {
-    # 1. Create the UpSet plot
     u_plot <- UpSetR::upset(UpSetR::fromList(filter_list), nintersects = 10, order.by = "freq", nsets = length(filter_list), text.scale = 1.5)
     
-    # 2. Create the Overall Flagged Pie Chart
     pie_data_overall <- data.frame(Category = dplyr::if_else(flag_table$flag_overall, "Flagged", "Kept")) %>%
       dplyr::count(Category) %>%
       dplyr::mutate(
@@ -539,7 +537,6 @@ run_spatial_qc <- function(counts,
       ggplot2::xlim(0.5, 2.5) + 
       ggplot2::theme(legend.position = "none")
     
-    # 3. Combine UpSet and Pie Chart using grid.grabExpr and patchwork
     plots$upset_plot <- patchwork::wrap_elements(grid::grid.grabExpr(print(u_plot))) +
       patchwork::inset_element(p_pie_overall, left = 0.65, bottom = 0.65, right = 1.0, top = 1.0)
   }
