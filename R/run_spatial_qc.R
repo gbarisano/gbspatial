@@ -350,8 +350,6 @@ summarizeFOVBias <- function(resid, gridfov, max_prop_loss) {
 #' @param bandwidth Numeric, bandwidth for spatial smoothing.
 #' @param weight_cutoff Numeric, cutoff for spatial weighting.
 #'
-#' @return A list containing filtered counts, metadata, xy, negcounts, a detailed flag logic table, and generated plots.
-#' @export
 run_spatial_qc <- function(counts, 
                            metadata, 
                            xy = NULL, 
@@ -367,7 +365,25 @@ run_spatial_qc <- function(counts,
   missing_pkgs <- required_pkgs[!(required_pkgs %in% installed.packages()[,"Package"])]
   if(length(missing_pkgs)) stop("Missing required packages: ", paste(missing_pkgs, collapse = ", "))
   
-  # Initialize storage
+  # Helper function to generate standardized pie charts for insets
+  make_qc_pie <- function(flags, label_pass = "Pass", label_fail = "Fail", fail_color = "#D73027") {
+    df <- data.frame(Category = ifelse(flags, label_fail, label_pass)) %>%
+      dplyr::count(Category) %>%
+      dplyr::mutate(
+        Percentage = (n / sum(n)) * 100,
+        Label = paste0(Category, "\nn=", n, "\n(", round(Percentage, 1), "%)")
+      )
+    
+    ggplot2::ggplot(df, ggplot2::aes(x = 2, y = n, fill = Category)) +
+      ggplot2::geom_bar(stat = "identity", width = 1, color = "white") +
+      ggplot2::coord_polar("y", start = 0) +
+      ggplot2::scale_fill_manual(values = setNames(c(fail_color, "gray90"), c(label_fail, label_pass))) +
+      ggplot2::geom_text(ggplot2::aes(label = Label), position = ggplot2::position_stack(vjust = 0.5), size = 2.5, fontface = "bold") +
+      ggplot2::theme_void() +
+      ggplot2::xlim(0.5, 2.5) + 
+      ggplot2::theme(legend.position = "none")
+  }
+
   plots <- list()
   flag_table <- data.frame(
     cell_id = metadata$cell_id,
@@ -384,12 +400,15 @@ run_spatial_qc <- function(counts,
     message("Running nCount_RNA QC...")
     flag_table$flag_nCount <- metadata$nCount_RNA < count_threshold
     
-    plots$nCount_hist <- ggplot2::ggplot(metadata, ggplot2::aes(x = nCount_RNA)) +
+    p_hist <- ggplot2::ggplot(metadata, ggplot2::aes(x = nCount_RNA)) +
       ggplot2::geom_histogram(bins = 500, fill = "gray50") +
       ggplot2::geom_vline(xintercept = count_threshold, col = "red") +
       ggplot2::coord_cartesian(xlim = c(0, 1000)) +
       ggplot2::theme_minimal() +
       ggplot2::labs(x = "nCount_RNA", y = "Frequency", title = "Cell-level QC: nCount_RNA")
+    
+    p_pie <- make_qc_pie(flag_table$flag_nCount, "Pass", "Low Count")
+    plots$nCount_hist <- p_hist + patchwork::inset_element(p_pie, left = 0.6, bottom = 0.5, right = 1.0, top = 1.0)
   }
   
   # --- 2. Cell Area QC ---
@@ -397,11 +416,14 @@ run_spatial_qc <- function(counts,
     message("Running Cell Area QC...")
     flag_table$flag_area <- metadata$Area > area_threshold
     
-    plots$area_hist <- ggplot2::ggplot(metadata, ggplot2::aes(x = Area)) +
+    p_hist <- ggplot2::ggplot(metadata, ggplot2::aes(x = Area)) +
       ggplot2::geom_histogram(bins = 100, fill = "gray50") +
       ggplot2::geom_vline(xintercept = area_threshold, col = "red") +
       ggplot2::theme_minimal() +
       ggplot2::labs(x = "Cell Area", y = "Frequency", title = "Cell Area QC")
+    
+    p_pie <- make_qc_pie(flag_table$flag_area, "Pass", "High Area")
+    plots$area_hist <- p_hist + patchwork::inset_element(p_pie, left = 0.6, bottom = 0.5, right = 1.0, top = 1.0)
   }
   
   # --- 3. FOV-level QC ---
@@ -409,8 +431,7 @@ run_spatial_qc <- function(counts,
     if (is.null(xy)) stop("xy coordinates are required when do_runfovqc = TRUE.")
     message("Running FOV-level QC...")
     
-    # Use the internal package data instead of reading from URL
-    if(!panel_name %in% names(barcodes_by_panel)) stop("Panel name not found in barcodes list. Ensure 'barcodes_by_panel' is loaded.")
+    if(!panel_name %in% names(barcodes_by_panel)) stop("Panel name not found in barcodes list.")
     barcodemap <- barcodes_by_panel[[panel_name]]
     
     fovqcresult <- runFOVQC(counts = counts, xy = xy, fov = metadata$FOV, 
@@ -420,11 +441,14 @@ run_spatial_qc <- function(counts,
     
     flag_table$flag_fovqc <- metadata$FOV %in% fovqcresult$flaggedfovs
     
-    plots$fov_mapFlagged <- recordPlot(mapFlaggedFOVs(fovqcresult))
-    plots$fov_signalLoss <- recordPlot(FOVSignalLossSpatialPlot(fovqcresult))
+    pdf(NULL)
+    dev.control(displaylist = "enable")
+    mapFlaggedFOVs(fovqcresult); plots$fov_mapFlagged <- recordPlot(); plot.new()
+    FOVSignalLossSpatialPlot(fovqcresult); plots$fov_signalLoss <- recordPlot()
     if(length(fovqcresult$flaggedfovs_forbias) > 0) {
-      plots$fov_effectsHeatmap <- recordPlot(FOVEffectsHeatmap(fovqcresult))
+      plot.new(); FOVEffectsHeatmap(fovqcresult); plots$fov_effectsHeatmap <- recordPlot()
     }
+    dev.off()
   }
   
   # --- 4. Cells Near FOV Borders QC ---
@@ -432,28 +456,14 @@ run_spatial_qc <- function(counts,
     message("Running FOV Boundary QC...")
     flag_table$flag_boundary <- (metadata$SplitRatioToLocal > 0) & (metadata$SplitRatioToLocal < SplitRatioToLocalThreshold)
     
-    p_detail <- ggplot2::ggplot(
-      data = metadata[metadata$SplitRatioToLocal != 0,], 
-      ggplot2::aes(x = log2(SplitRatioToLocal))) + 
+    p_detail <- ggplot2::ggplot(data = metadata[metadata$SplitRatioToLocal != 0,], ggplot2::aes(x = log2(SplitRatioToLocal))) + 
       ggplot2::geom_histogram(bins = 100, fill = "steelblue") +
       ggplot2::labs(x = expression(log[2]("SplitRatioToLocal")), y = "Number of FOV border cells") + 
       ggplot2::theme_minimal() + 
       ggplot2::geom_vline(xintercept = log2(SplitRatioToLocalThreshold), color = "darkorange", lty = "dashed")
     
-    pie_data <- metadata %>%
-      dplyr::mutate(Category = dplyr::if_else(SplitRatioToLocal > 0, "Border cell", "Non-border cell")) %>%
-      dplyr::count(Category) %>%
-      dplyr::mutate(Percentage = (n / sum(n)) * 100, Label = paste0(Category, " (", round(Percentage, 1), "%)"))
-    
-    p_pie <- ggplot2::ggplot(pie_data, ggplot2::aes(x = 2, y = n, fill = Category)) +
-      ggplot2::geom_bar(stat = "identity", width = 1, color = "white") +
-      ggplot2::coord_polar("y", start = 0) +
-      ggplot2::scale_fill_manual(values = c("Border cell" = "steelblue", "Non-border cell" = "gray90")) +
-      ggplot2::geom_text(ggplot2::aes(label = Label), position = ggplot2::position_stack(vjust = 0.5), size = 3, fontface = "bold") +
-      ggplot2::theme_void() +
-      ggplot2::xlim(0.5, 2.5) + 
-      ggplot2::theme(legend.position = "none")
-    
+    # Custom labels for the Border vs Non-border pie
+    p_pie <- make_qc_pie(metadata$SplitRatioToLocal > 0, "Non-border", "Border cell", fail_color = "steelblue")
     plots$fov_boundary <- p_detail + patchwork::inset_element(p_pie, left = 0.6, bottom = 0.6, right = 1.0, top = 1.0)
   }
   
@@ -464,46 +474,29 @@ run_spatial_qc <- function(counts,
     
     max_dist <- sqrt(-2 * (bandwidth^2) * log(weight_cutoff))
     nn <- dbscan::frNN(xy, eps = max_dist)
-    
     n_neighbors <- sapply(nn$id, length)
     i_idx <- rep(1:nrow(xy), times = n_neighbors) 
     j_idx <- unlist(nn$id)                        
-    
-    distances <- unlist(nn$dist)
-    weights <- exp(-(distances^2) / (2 * bandwidth^2))
-    
+    weights <- exp(-(unlist(nn$dist)^2) / (2 * bandwidth^2))
     connectivities <- Matrix::sparseMatrix(i = i_idx, j = j_idx, x = weights, dims = c(nrow(xy), nrow(xy)))
     Matrix::diag(connectivities) <- 1
+    connectivities <- Matrix::Diagonal(x = 1 / Matrix::rowSums(connectivities)) %*% connectivities
     
-    row_sums <- Matrix::rowSums(connectivities)
-    connectivities <- Matrix::Diagonal(x = 1 / row_sums) %*% connectivities
+    smoothed_mean_neg <- as.vector(Matrix::rowMeans(connectivities %*% negcounts))
+    smoothed_mean_target <- as.vector(Matrix::rowMeans(connectivities %*% counts))
     
-    counts_neg_spatially_smooth <- connectivities %*% negcounts
-    counts_spatially_smooth <- connectivities %*% counts 
-    
-    smoothed_mean_neg <- as.vector(Matrix::rowMeans(counts_neg_spatially_smooth))
-    smoothed_mean_target <- as.vector(Matrix::rowMeans(counts_spatially_smooth))
-    
-    epsilon <- 1e-9
-    metadata$SBR <- smoothed_mean_target / (smoothed_mean_neg + epsilon)
-    
+    metadata$SBR <- smoothed_mean_target / (smoothed_mean_neg + 1e-9)
     flag_table$flag_regional <- log2(metadata$SBR) < 0
     
     sbr_breaks <- c(-Inf, -1, 0, 1, 2, 3, Inf)
     sbr_labels <- c("<= -1", "-1 to 0", "0 to 1", "1 to 2", "2 to 3", "> 3")
-    sbr_labels <- paste0(sbr_labels, paste0(" (", round(100 * table(cut(log2(metadata$SBR), breaks = sbr_breaks)) / nrow(metadata), 1), "%)"))
-    
     manual_colors <- c("<= -1" = "#D73027", "-1 to 0" = "#F46D43", "0 to 1" = "#D9EF8B", "1 to 2" = "#A6D96A", "2 to 3" = "#1A9850", "> 3" = "#006837")
-    names(manual_colors) <- sbr_labels
     
     plots$regional_sbr <- ggplot2::ggplot(data = metadata) +
-      ggplot2::geom_point(ggplot2::aes(x = x_slide_mm, y = y_slide_mm, color = cut(log2(SBR), breaks = sbr_breaks, labels = sbr_labels)), size = 0.001, alpha = 1) +
+      ggplot2::geom_point(ggplot2::aes(x = x_slide_mm, y = y_slide_mm, color = cut(log2(SBR), breaks = sbr_breaks, labels = sbr_labels)), size = 0.001) +
       ggplot2::scale_color_manual(values = manual_colors) +
-      ggplot2::guides(color = ggplot2::guide_legend(override.aes = list(size = 7, alpha = 1))) +
-      ggplot2::labs(color = "log2(SBR)") +
-      ggplot2::coord_fixed() +
-      ggplot2::theme_bw() + 
-      ggplot2::facet_wrap(~Run_Tissue_name)
+      ggplot2::guides(color = ggplot2::guide_legend(override.aes = list(size = 7))) +
+      ggplot2::coord_fixed() + ggplot2::theme_bw() + ggplot2::facet_wrap(~Run_Tissue_name)
   }
   
   # --- 6. Combine Flags and UpSet Plot ---
@@ -515,27 +508,11 @@ run_spatial_qc <- function(counts,
     `FOV QC` = flag_table$cell_id[flag_table$flag_fovqc],
     `Low SplitRatio` = flag_table$cell_id[flag_table$flag_boundary],
     `Low SBR` = flag_table$cell_id[flag_table$flag_regional]
-  )
-  filter_list <- purrr::keep(filter_list, ~ length(.) > 0)
+  ) %>% purrr::keep(~ length(.) > 0)
   
   if (length(filter_list) > 1) {
     u_plot <- UpSetR::upset(UpSetR::fromList(filter_list), nintersects = 10, order.by = "freq", nsets = length(filter_list), text.scale = 1.5)
-    
-    pie_data_overall <- data.frame(Category = dplyr::if_else(flag_table$flag_overall, "Flagged", "Kept")) %>%
-      dplyr::count(Category) %>%
-      dplyr::mutate(
-        Percentage = (n / sum(n)) * 100, 
-        Label = paste0(Category, "\n(", round(Percentage, 1), "%)")
-      )
-    
-    p_pie_overall <- ggplot2::ggplot(pie_data_overall, ggplot2::aes(x = 2, y = n, fill = Category)) +
-      ggplot2::geom_bar(stat = "identity", width = 1, color = "white") +
-      ggplot2::coord_polar("y", start = 0) +
-      ggplot2::scale_fill_manual(values = c("Flagged" = "#D73027", "Kept" = "gray90")) +
-      ggplot2::geom_text(ggplot2::aes(label = Label), position = ggplot2::position_stack(vjust = 0.5), size = 3.5, fontface = "bold") +
-      ggplot2::theme_void() +
-      ggplot2::xlim(0.5, 2.5) + 
-      ggplot2::theme(legend.position = "none")
+    p_pie_overall <- make_qc_pie(flag_table$flag_overall, "Kept", "Flagged")
     
     plots$upset_plot <- patchwork::wrap_elements(grid::grid.grabExpr(print(u_plot))) +
       patchwork::inset_element(p_pie_overall, left = 0.65, bottom = 0.65, right = 1.0, top = 1.0)
@@ -543,7 +520,6 @@ run_spatial_qc <- function(counts,
   
   # --- 7. Subset and Return ---
   keep_idx <- !flag_table$flag_overall
-  
   return(list(
     counts = counts[keep_idx, , drop = FALSE],
     metadata = metadata[keep_idx, , drop = FALSE],
