@@ -416,7 +416,7 @@ run_spatial_qc <- function(counts,
     message("Running Cell Area QC...")
     flag_table$flag_area <- metadata$Area > area_threshold
     
-    p_hist <- ggplot2::ggplot(metadata, ggplot2::aes(x = Area)) +
+    p_hist <- ggplot2::ggplot(metadata, ggplot2::aes(x = as.numeric(Area))) +
       ggplot2::geom_histogram(bins = 100, fill = "gray50") +
       ggplot2::geom_vline(xintercept = area_threshold, col = "red") +
       ggplot2::theme_minimal() +
