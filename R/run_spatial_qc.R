@@ -341,7 +341,7 @@ summarizeFOVBias <- function(resid, gridfov, max_prop_loss) {
 #' @param do_cellArea Logical, perform cell area QC.
 #' @param area_threshold Numeric, maximum allowed cell area.
 #' @param do_runfovqc Logical, perform FOV-level QC.
-#' @param panel_name Character, panel name for barcodes (e.g., "Hs_6k").
+#' @param panel_name Character, panel name for barcodes (one of the following: "Hs_IO", "Hs_UCC", "Hs_6k", "Mm_Neuro", "Mm_UCC", "Hs_WTX". Default is "Hs_6k").
 #' @param max_prop_loss Numeric, FOV QC parameter.
 #' @param max_totalcounts_loss Numeric, FOV QC parameter.
 #' @param do_FOV_boundary Logical, perform FOV boundary QC.
