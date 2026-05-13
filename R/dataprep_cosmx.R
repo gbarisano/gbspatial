@@ -82,7 +82,7 @@ condenseTissues <- function(xy, tissue, tissueorder = NULL, buffer = 0.2, widthh
 #' @param myflatfiledir A character vector of one or more directories containing CosMx slide folders.
 #' @param plot_tissues Logical. If TRUE, plots the condensed tissue layouts. Default is FALSE.
 #' @return A list containing `"counts"`, `"negcounts"`, `"falsecounts"`, `"metadata"`, and `"xy"`.
-#' @import data.table
+#' @importFrom data.table fread rbindlist
 #' @importFrom Matrix Matrix
 #' @importFrom methods as
 #' @importFrom utils txtProgressBar setTxtProgressBar
@@ -146,7 +146,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       if (length(thisslidespolygon) != 0) {
       polygons=data.table::fread(file.path(current_path, thisslidespolygon))
         boundarycells=unique(polygons$cell[polygons$x_local_px %in% c(1, max(polygons$x_local_px)) | polygons$y_local_px %in% c(1, max(polygons$y_local_px))])
-      tempdatatable[, SplitRatioToLocal := if (any(cell_id %in% boundarycells)) {round(Area / mean(Area), 2)} else {0},by=fov]
+      tempdatatable <- tempdatatable[, c(.SD, .(SplitRatioToLocal = if (any(cell_id %in% boundarycells)) {round(Area / mean(Area), 2)} else {0})), by = fov]
         } else {
         Message(paste("No polygon file found for", slidename,", which would be needed to generate SplitRatioToLocal which is not present in its corresponding metadata file", thisslidemetadata))
         }
