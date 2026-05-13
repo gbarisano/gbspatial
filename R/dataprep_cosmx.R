@@ -224,7 +224,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   metadata <- data.table::rbindlist(metadatalist)
   
   # add to metadata: add a global non-slide-specific FOV ID:
-  metadata$FOV <- paste0("s", metadata$slide_ID, "f", metadata$fov)
+  metadata$FOV <- paste0("s", metadata$slide_ID_numeric, "f", metadata$fov)
   
   # remove cell_ID metadata column, which only identifies cell within slides, not across slides:
   metadata$cell_ID <- NULL
