@@ -139,6 +139,18 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
     
     # global cell ID 
     tempdatatable$global_cell_ID <- paste0("c_", slide_ID_numeric, "_", tempdatatable$fov, "_", tempdatatable$cell_ID)
+
+    # Create SplitRatioToLocal if it does not exist (this is useful metric for QC of cells near FOV boundaries)
+    if (!"SplitRatioToLocal" %in% names(tempdatatable)) {
+      thisslidespolygon <- thisslidesfiles[grepl("polygons", thisslidesfiles)]
+      if (length(thisslidespolygon) != 0) {
+      polygons=data.table::fread(file.path(current_path, thisslidespolygon))
+        boundarycells=unique(polygons$cell[polygons$x_local_px %in% c(1, max(polygons$x_local_px)) | polygons$y_local_px %in% c(1, max(polygons$y_local_px))])
+      tempdatatable[, SplitRatioToLocal := if (any(cell_id %in% boundarycells)) {round(Area / mean(Area), 2)} else {0},by=fov]
+        } else {
+        Message(paste("No polygon file found for", slidename,", which would be needed to generate SplitRatioToLocal which is not present in its corresponding metadata file", thisslidemetadata))
+        }
+    }
     
     # load in counts as a data table:
     thisslidescounts <- thisslidesfiles[grepl("exprMat\\_file", thisslidesfiles)]
