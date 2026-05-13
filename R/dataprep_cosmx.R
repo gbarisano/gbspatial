@@ -228,7 +228,10 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   metadata$FOV <- paste0("s", metadata$slide_ID_numeric, "f", metadata$fov)
   
   # remove cell_ID metadata column, which only identifies cell within slides, not across slides:
-  metadata$cell_ID <- NULL
+  metadata$cell_ID <- metadata$global_cell_ID
+  metadata$cell <- NULL
+  metadata$cell_id <- NULL
+  metadata$global_cell_ID <- NULL
   
   # add coordinates in mm
   um_per_px <- 0.120280945 # dimension of each pixel in micro-meter
@@ -246,7 +249,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   xy <- as.matrix(metadata[, c("CenterX_global_px", "CenterY_global_px"), with = FALSE])
   
   # Use the generated global_cell_ID for rownames to ensure accuracy 
-  rownames(xy) <- metadata$global_cell_ID
+  rownames(xy) <- metadata$cell_ID
   
   # rescale to mm:
   thisinstrument_nanometers_per_pixel = 120.280945   
