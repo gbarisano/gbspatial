@@ -105,6 +105,8 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   }
   
   slidenames <- basename(slide_paths)
+  #make unique slidenames if duplicates
+  slidenames=ave(slidenames, slidenames, FUN = \(v) ifelse(seq_along(v) == 1,v,paste0(v, "-", seq_along(v))))
   
   # Lists to collect the counts matrices and metadata, one per slide
   countlist <- vector(mode = 'list', length = length(slide_paths)) 
