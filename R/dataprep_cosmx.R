@@ -141,11 +141,11 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
     tempdatatable$global_cell_ID <- paste0("c_", slide_ID_numeric, "_", tempdatatable$fov, "_", tempdatatable$cell_ID)
 
     # Create SplitRatioToLocal if it does not exist (this is useful metric for QC of cells near FOV boundaries)
-    if (!"SplitRatioToLocal" %in% names(tempdatatable)) {
+    if (!"SplitRatioToLocal" %in% names(tempdatatable) || all(is.na(tempdatatable$SplitRatioToLocal))) {
       thisslidespolygon <- thisslidesfiles[grepl("polygons", thisslidesfiles)]
       if (length(thisslidespolygon) != 0) {
       polygons=data.table::fread(file.path(current_path, thisslidespolygon))
-        boundarycells=unique(polygons$cell[polygons$x_local_px %in% c(1, max(polygons$x_local_px)) | polygons$y_local_px %in% c(1, max(polygons$y_local_px))])
+        boundarycells=unique(polygons$cell[polygons$x_local_px %in% c(min(polygons$x_local_px), max(polygons$x_local_px)) | polygons$y_local_px %in% c(min(polygons$y_local_px), max(polygons$y_local_px))]) #in some cases local_px may go from 0 to 4255, some other cases may go from 1 to 4254
         #tempdatatable <- tempdatatable[, c(.SD, .(SplitRatioToLocal = if (any(cell_id %in% boundarycells)) {round(Area / mean(Area), 2)} else {0})), by = fov]
 
         has_boundary <- as.logical(ave(tempdatatable$cell_id %in% boundarycells, tempdatatable$fov, FUN = any)) # Check if the group contains a boundary cell (returns a logical vector)
