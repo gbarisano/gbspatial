@@ -131,7 +131,8 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
     tempdatatable$slidename <- slidename
     
     # numeric slide ID 
-    slide_ID_numeric <- tempdatatable[1,]$slide_ID 
+    #slide_ID_numeric <- tempdatatable[1,]$slide_ID 
+    tempdatatable$slide_ID_numeric=i
     
     # global cell ID 
     tempdatatable$global_cell_ID <- paste0("c_", slide_ID_numeric, "_", tempdatatable$fov, "_", tempdatatable$cell_ID)
