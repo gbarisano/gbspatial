@@ -146,7 +146,11 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       if (length(thisslidespolygon) != 0) {
       polygons=data.table::fread(file.path(current_path, thisslidespolygon))
         boundarycells=unique(polygons$cell[polygons$x_local_px %in% c(1, max(polygons$x_local_px)) | polygons$y_local_px %in% c(1, max(polygons$y_local_px))])
-      tempdatatable <- tempdatatable[, c(.SD, .(SplitRatioToLocal = if (any(cell_id %in% boundarycells)) {round(Area / mean(Area), 2)} else {0})), by = fov]
+        #tempdatatable <- tempdatatable[, c(.SD, .(SplitRatioToLocal = if (any(cell_id %in% boundarycells)) {round(Area / mean(Area), 2)} else {0})), by = fov]
+
+        has_boundary <- as.logical(ave(tempdatatable$cell_id %in% boundarycells, tempdatatable$fov, FUN = any)) # Check if the group contains a boundary cell (returns a logical vector)
+        mean_area <- ave(tempdatatable$Area, tempdatatable$fov, FUN = mean) #Calculate the mean area per group
+        tempdatatable$SplitRatioToLocal <- ifelse(has_boundary, round(tempdatatable$Area / mean_area, 2), 0)
         } else {
         Message(paste("No polygon file found for", slidename,", which would be needed to generate SplitRatioToLocal which is not present in its corresponding metadata file", thisslidemetadata))
         }
