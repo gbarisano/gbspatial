@@ -82,7 +82,7 @@ condenseTissues <- function(xy, tissue, tissueorder = NULL, buffer = 0.2, widthh
 #' @param myflatfiledir A character vector of one or more directories containing CosMx slide folders.
 #' @param plot_tissues Logical. If TRUE, plots the condensed tissue layouts. Default is FALSE.
 #' @return A list containing `"counts"`, `"negcounts"`, `"falsecounts"`, `"metadata"`, and `"xy"`.
-#' @importFrom data.table fread rbindlist
+#' @import data.table
 #' @importFrom Matrix Matrix
 #' @importFrom methods as
 #' @importFrom utils txtProgressBar setTxtProgressBar
