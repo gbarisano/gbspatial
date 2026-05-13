@@ -273,6 +273,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
            max(xy[metadata$Run_Tissue_name == s_name, 2]), 
            s_name)
     }
+    condensed_tissue_plot <- recordPlot()
   }
   
   # Return final list object
@@ -281,7 +282,8 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
     negcounts = negcounts,
     falsecounts = falsecounts,
     metadata = metadata,
-    xy = xy
+    xy = xy,
+    condensed_tissue_plot = if (exists("condensed_tissue_plot")) condensed_tissue_plot else NULL
   )
   
   return(result_obj)
