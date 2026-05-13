@@ -230,7 +230,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   # remove cell_ID metadata column, which only identifies cell within slides, not across slides:
   metadata$cell_ID <- metadata$global_cell_ID
   metadata$cell <- NULL
-  metadata$cell_id <- NULL
+  metadata$cell_id <- metadata$cell_ID
   metadata$global_cell_ID <- NULL
   
   # add coordinates in mm
