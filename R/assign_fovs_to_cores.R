@@ -1,74 +1,47 @@
-#' Assign FOVs to TMA Cores
+#' Assign FOVs to TMA Cores via FOV Geometry and Cell-Refined Anchors
 #'
 #' @description 
-#' Maps Field of View (FOV) coordinates to a Tissue Microarray (TMA) grid matrix. 
-#' Groups adjacent FOVs into spatial cores, aligns them to physical slide dimensions, 
-#' and merges them with clinical IDs from a TMA map. Supports batch processing of 
-#' lists or vectors of inputs.
+#' Maps FOVs to a TMA grid using a dual-modality approach with phantom core prevention. 
+#' Drops theoretical grid anchors that drift too far from their origin or capture 
+#' insufficient cells. Outputs row-by-row plots and a whole-slide plot with an explicit
+#' theoretical grid overlay and detailed text labels for assignment verification.
 #'
-#' @param fov_input A file path (character string), dataframe, or list of file paths/dataframes containing FOV coordinate data. Must contain `x_global_px`, `y_global_px`, and `FOV` columns.
-#' @param tma_map_input A matrix, dataframe, or list of matrices/dataframes representing the physical TMA layout. If a single matrix is provided alongside multiple `fov_input`s, it will be automatically replicated.
+#' @param fov_input Data source for FOVs. Must contain `x_global_px`, `y_global_px` (top-left), and `FOV`.
+#' @param cell_input Data source for Cells. Must contain `CenterX_global_px`, `CenterY_global_px`, and `FOV`.
+#' @param tma_map_input A matrix/dataframe representing the physical TMA layout.
 #' @param fov_size Numeric. The size of the FOV in pixels. Default is `4256`.
-#' @param tol Numeric. Spatial tolerance in pixels for clustering adjacent FOVs. Default is `150`.
-#' @param slidelabels Optional character vector of slide names. Length must match the number of FOV inputs.
+#' @param core_drift_tolerance Numeric (0 to 1). The maximum fraction of grid spacing an anchor is allowed to move before being flagged as a "phantom". Default `0.40`.
+#' @param min_cells Numeric. Minimum number of cells required to validate a core anchor. Default `50`.
+#' @param slidelabels Optional character vector of slide names.
 #'
-#' @return A named list containing two elements:
-#' \describe{
-#'   \item{mapped_data}{A single combined dataframe containing all merged FOV and core assignments.}
-#'   \item{plots}{A nested list of ggplot objects grouped by slide name and TMA row.}
-#' }
+#' @return A named list containing `mapped_data` and `plots`.
 #' 
-#' @importFrom dplyr mutate group_by ungroup bind_rows row_number
+#' @importFrom dplyr mutate group_by ungroup bind_rows row_number select summarise left_join coalesce slice_sample filter
 #' @importFrom tidyr pivot_longer
-#' @importFrom ggplot2 ggplot geom_rect geom_text aes coord_equal theme_minimal labs theme
-#' @importFrom stats dist hclust cutree
+#' @importFrom ggplot2 ggplot geom_rect geom_text geom_point geom_hline geom_vline aes coord_equal theme_minimal labs theme
 #' @importFrom utils read.csv
 #' @export
-#'
-#' @examples
-#' \dontrun{
-#' # Process a single slide
-#' res <- assign_fovs_to_cores("slide1_fovs.csv", tma_matrix)
-#' 
-#' # Process a batch of slides with a single replicated TMA map
-#' res_batch <- assign_fovs_to_cores(
-#'   fov_input = c("s1.csv", "s2.csv", "s3.csv"), 
-#'   tma_map_input = tma_matrix,
-#'   slidelabels = c("Patient_A", "Patient_B", "Patient_C")
-#' )
-#' }
-assign_fovs_to_cores <- function(fov_input, tma_map_input, fov_size = 4256, tol = 150, slidelabels = NULL) {
+assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size = 4256, 
+                                 core_drift_tolerance = 0.40, min_cells = 50, slidelabels = NULL) {
   
-  # 1. Standardize fov_input
-  if (is.data.frame(fov_input) || is.matrix(fov_input)) {
-    fov_input <- list(fov_input)
-  } else {
-    fov_input <- as.list(fov_input)
-  }
+  # 1. Standardize Inputs
+  if (is.data.frame(fov_input) || is.matrix(fov_input)) fov_input <- list(fov_input)
+  else fov_input <- as.list(fov_input)
+  
+  if (is.data.frame(cell_input) || is.matrix(cell_input)) cell_input <- list(cell_input)
+  else cell_input <- as.list(cell_input)
   
   n_slides <- length(fov_input)
+  if (length(cell_input) != n_slides) stop("Number of FOV inputs must match cell inputs.")
   
-  # 2. Standardize tma_map_input
-  if (is.data.frame(tma_map_input) || is.matrix(tma_map_input)) {
-    tma_map_input <- list(tma_map_input)
-  } else {
-    tma_map_input <- as.list(tma_map_input)
-  }
+  if (is.data.frame(tma_map_input) || is.matrix(tma_map_input)) tma_map_input <- list(tma_map_input)
+  else tma_map_input <- as.list(tma_map_input)
   
-  # 3. Handle single map for multiple slides
-  if (length(tma_map_input) == 1 && n_slides > 1) {
-    tma_map_input <- rep(tma_map_input, n_slides)
-  }
+  if (length(tma_map_input) == 1 && n_slides > 1) tma_map_input <- rep(tma_map_input, n_slides)
+  if (n_slides != length(tma_map_input)) stop("TMA map inputs must be 1 or match the number of FOV/cell inputs.")
   
-  if (n_slides != length(tma_map_input)) {
-    stop("The number of TMA map inputs must be 1, or exactly match the number of FOV inputs.")
-  }
-  
-  # 4. Determine slidenames based on precedence rules
   if (!is.null(slidelabels)) {
-    if (length(slidelabels) != n_slides) {
-      stop("Length of 'slidelabels' must match the number of FOV inputs.")
-    }
+    if (length(slidelabels) != n_slides) stop("Length of 'slidelabels' must match inputs.")
     slide_names <- slidelabels
   } else if (!is.null(names(fov_input)) && all(names(fov_input) != "")) {
     slide_names <- names(fov_input)
@@ -79,59 +52,105 @@ assign_fovs_to_cores <- function(fov_input, tma_map_input, fov_size = 4256, tol 
   all_mapped_data <- list()
   all_plots <- list()
   
-  # 5. Iterate through each slide/input pair
   for (i in seq_len(n_slides)) {
-    
     current_slide <- slide_names[i]
-    curr_fov_input <- fov_input[[i]]
-    curr_map_input <- tma_map_input[[i]]
     
-    # Read FOV data safely
-    if (is.character(curr_fov_input)) {
-      fov <- utils::read.csv(curr_fov_input)
-    } else {
-      fov <- as.data.frame(curr_fov_input)
-    }
+    if (is.character(fov_input[[i]])) fov <- utils::read.csv(fov_input[[i]]) else fov <- as.data.frame(fov_input[[i]])
+    if (is.character(cell_input[[i]])) cells <- utils::read.csv(cell_input[[i]]) else cells <- as.data.frame(cell_input[[i]])
     
     fov$slidename <- current_slide
+    cells$slidename <- current_slide
     
-    tma_map_df <- as.data.frame(curr_map_input)
+    tma_map_df <- as.data.frame(tma_map_input[[i]])
     n_rows <- nrow(tma_map_df)
     n_cols <- ncol(tma_map_df)
     
-    # Group adjacent FOVs into Cores
-    dist_mat <- stats::dist(fov[, c("x_global_px", "y_global_px")], method = "maximum")
-    hc <- stats::hclust(dist_mat, method = "single")
-    fov$core_cluster <- stats::cutree(hc, h = fov_size + tol)
-    
-    # Calculate Centers for each Core Cluster
-    # Using the .data pronoun is best practice in packages to avoid R CMD check warnings
-    fov <- fov |>
-      dplyr::group_by(.data$core_cluster) |>
-      dplyr::mutate(
-        xcenter = (min(.data$x_global_px) + max(.data$x_global_px) + fov_size) / 2,
-        ycenter = (min(.data$y_global_px) + max(.data$y_global_px) + fov_size) / 2,
-        fov_core = paste(.data$FOV, collapse = "+") 
-      ) |>
-      dplyr::ungroup()
-    
-    # Grid Assignment
-    xmin_global <- min(fov$x_global_px)
-    xmax_global <- max(fov$x_global_px) + fov_size
-    ymin_global <- min(fov$y_global_px)
-    ymax_global <- max(fov$y_global_px) + fov_size
+    # 2. Establish Grid from True FOV Coordinates
+    xmin_global <- min(fov$x_global_px, na.rm = TRUE)
+    xmax_global <- max(fov$x_global_px, na.rm = TRUE) + fov_size
+    ymax_global <- max(fov$y_global_px, na.rm = TRUE)
+    ymin_global <- min(fov$y_global_px, na.rm = TRUE) - fov_size 
     
     xinter <- (xmax_global - xmin_global) / n_cols
     yinter <- (ymax_global - ymin_global) / n_rows
     
-    fov <- fov |>
+    # Coordinates for plotting the visual grid lines
+    v_lines <- seq(xmin_global, xmax_global, by = xinter)
+    h_lines <- seq(ymin_global, ymax_global, by = yinter)
+    
+    grid_anchors <- expand.grid(core_col = 1:n_cols, core_row = 1:n_rows) |>
       dplyr::mutate(
-        core_col = pmin(floor((.data$xcenter - xmin_global) / xinter) + 1, n_cols),
-        core_row = pmin(floor((.data$ycenter - ymin_global) / yinter) + 1, n_rows),
+        anchor_x = xmin_global + (.data$core_col - 0.5) * xinter,
+        anchor_y = ymax_global - (.data$core_row - 0.5) * yinter,
         core_str = paste0("C", .data$core_col, "R", .data$core_row)
       )
     
-    # Parse TMA matrix safely
+    # 3. Fast Initial Cell Assignment
+    dist_mat <- matrix(NA, nrow = nrow(cells), ncol = nrow(grid_anchors))
+    for (k in 1:nrow(grid_anchors)) {
+      dist_mat[, k] <- (cells$CenterX_global_px - grid_anchors$anchor_x[k])^2 + 
+                       (cells$CenterY_global_px - grid_anchors$anchor_y[k])^2
+    }
+    cells$initial_idx <- max.col(-dist_mat, ties.method = "first")
+    cells$core_str <- grid_anchors$core_str[cells$initial_idx]
+    
+    # 4. Refine Anchors AND Validate (Prevent Phantom Core Splitting)
+    refined_anchors <- cells |>
+      dplyr::group_by(.data$core_str) |>
+      dplyr::summarise(
+        refined_x = mean(.data$CenterX_global_px, na.rm = TRUE),
+        refined_y = mean(.data$CenterY_global_px, na.rm = TRUE),
+        cell_count = dplyr::n(),
+        .groups = "drop"
+      )
+    
+    final_anchors <- grid_anchors |>
+      dplyr::left_join(refined_anchors, by = "core_str") |>
+      dplyr::mutate(
+        drift_x = abs(.data$refined_x - .data$anchor_x),
+        drift_y = abs(.data$refined_y - .data$anchor_y),
+        is_valid = !is.na(.data$refined_x) & 
+                   .data$cell_count >= min_cells &
+                   .data$drift_x <= (xinter * core_drift_tolerance) &
+                   .data$drift_y <= (yinter * core_drift_tolerance)
+      ) |>
+      dplyr::filter(.data$is_valid) |>
+      dplyr::mutate(
+        final_x = .data$refined_x,
+        final_y = .data$refined_y
+      )
+    
+    if (nrow(final_anchors) == 0) stop(paste("No valid cores found for slide", current_slide, "- Check coordinates or tolerance."))
+    
+    # 5. Snap Geometric FOV Centers to VALID Anchors only
+    fov <- fov |>
+      dplyr::mutate(
+        fov_xmin = .data$x_global_px,
+        fov_xmax = .data$x_global_px + fov_size,
+        fov_ymax = .data$y_global_px,
+        fov_ymin = .data$y_global_px - fov_size,
+        fov_xcenter = .data$x_global_px + (fov_size / 2),
+        fov_ycenter = .data$y_global_px - (fov_size / 2)
+      )
+    
+    fov_dist_mat <- matrix(NA, nrow = nrow(fov), ncol = nrow(final_anchors))
+    for (k in 1:nrow(final_anchors)) {
+      fov_dist_mat[, k] <- (fov$fov_xcenter - final_anchors$final_x[k])^2 + 
+                           (fov$fov_ycenter - final_anchors$final_y[k])^2
+    }
+    
+    closest_idx <- max.col(-fov_dist_mat, ties.method = "first")
+    dist_to_anchor <- sqrt(fov_dist_mat[cbind(1:nrow(fov), closest_idx)])
+    max_fov_dist <- sqrt(xinter^2 + yinter^2) * 0.7 
+    
+    fov <- fov |>
+      dplyr::mutate(
+        core_col = ifelse(dist_to_anchor <= max_fov_dist, final_anchors$core_col[closest_idx], NA),
+        core_row = ifelse(dist_to_anchor <= max_fov_dist, final_anchors$core_row[closest_idx], NA),
+        core_str = ifelse(dist_to_anchor <= max_fov_dist, final_anchors$core_str[closest_idx], NA)
+      )
+    
+    # 6. Merge FOV data with TMA Clinical IDs
     colnames(tma_map_df) <- 1:n_cols
     tma_map_long <- tma_map_df |>
       dplyr::mutate(core_row = rev(dplyr::row_number())) |> 
@@ -141,37 +160,84 @@ assign_fovs_to_cores <- function(fov_input, tma_map_input, fov_size = 4256, tol 
         core_str = paste0("C", .data$core_col, "R", .data$core_row)
       )
     
-    # Merge FOV data with Clinical IDs
     res <- merge(fov, tma_map_long, by = c("core_col", "core_row", "core_str"), all.x = TRUE)
-    
-    # Update FOV to be a unique ID
     res$original_FOV <- res$FOV
     res$FOV <- paste(res$slidename, res$original_FOV, sep = "_")
     
-    # Generate Plots per TMA Row
-    plot_list <- list()
-    unique_rows <- sort(unique(res$core_row))
+    # 7. Assign Cells
+    cells_merged <- merge(cells, res[, c("original_FOV", "core_str")], by.x = "FOV", by.y = "original_FOV", all.x = TRUE)
     
+    plot_list <- list()
+    
+    # 8. Generate Whole-Slide Plot (with visual grid and explicit text labels)
+    sampled_cells_whole <- cells_merged |>
+      dplyr::group_by(.data$FOV) |>
+      dplyr::slice_sample(n = 200) |> 
+      dplyr::ungroup()
+      
+    p_whole <- ggplot2::ggplot() +
+      ggplot2::geom_hline(yintercept = h_lines, color = "grey40", linetype = "dashed", alpha = 0.6) +
+      ggplot2::geom_vline(xintercept = v_lines, color = "grey40", linetype = "dashed", alpha = 0.6) +
+      ggplot2::geom_point(
+        data = sampled_cells_whole,
+        ggplot2::aes(x = .data$CenterX_global_px, y = .data$CenterY_global_px, 
+                     color = factor(.data$core_str.y)), 
+        size = 0.2, alpha = 0.4, na.rm = TRUE
+      ) +
+      ggplot2::geom_rect(
+        data = res,
+        ggplot2::aes(xmin = .data$fov_xmin, xmax = .data$fov_xmax, 
+                     ymin = .data$fov_ymin, ymax = .data$fov_ymax, 
+                     fill = factor(.data$core_str)), 
+        color = "black", alpha = 0.2
+      ) +
+      ggplot2::geom_text(
+        data = res,
+        ggplot2::aes(x = .data$fov_xcenter, y = .data$fov_ycenter, 
+                     label = ifelse(is.na(.data$core_str), 
+                                    paste0(.data$original_FOV, "\n[NA]"), 
+                                    paste0(.data$original_FOV, "\n[", .data$core_str, "]"))), 
+        color = "black", size = 2.2, fontface = "bold"
+      ) +
+      ggplot2::coord_equal() +  
+      ggplot2::theme_minimal() + 
+      ggplot2::labs(title = paste("Whole Slide Overview:", current_slide),
+                    subtitle = "Dashed lines indicate theoretical grid boundaries") +
+      ggplot2::theme(legend.position = "none") 
+    
+    plot_list[["Whole_Slide"]] <- p_whole
+    
+    # 9. Generate Row-by-Row Plots
+    unique_rows <- sort(unique(res$core_row[!is.na(res$core_row)]))
     for (c_row in unique_rows) {
-      p <- ggplot2::ggplot(res[res$core_row == c_row, ]) +
+      
+      fov_sub <- res[!is.na(res$core_row) & res$core_row == c_row, ]
+      cell_sub <- cells_merged[!is.na(cells_merged$core_str.y) & cells_merged$core_str.y %in% fov_sub$core_str, ]
+      
+      p <- ggplot2::ggplot() +
+        ggplot2::geom_point(
+          data = cell_sub,
+          ggplot2::aes(x = .data$CenterX_global_px, y = .data$CenterY_global_px, 
+                       color = factor(.data$core_str.y)), 
+          size = 0.5, alpha = 0.4
+        ) +
         ggplot2::geom_rect(
-          ggplot2::aes(xmin = .data$x_global_px, xmax = .data$x_global_px + fov_size, 
-                       ymin = .data$y_global_px - fov_size, ymax = .data$y_global_px, 
+          data = fov_sub,
+          ggplot2::aes(xmin = .data$fov_xmin, xmax = .data$fov_xmax, 
+                       ymin = .data$fov_ymin, ymax = .data$fov_ymax, 
                        fill = factor(.data$core_str)), 
-          color = "black", alpha = 0.6
+          color = "black", alpha = 0.3
         ) +
         ggplot2::geom_text(
-          ggplot2::aes(x = .data$x_global_px + (fov_size / 2), 
-                       y = .data$y_global_px - (fov_size / 2), 
+          data = fov_sub,
+          ggplot2::aes(x = .data$fov_xcenter, y = .data$fov_ycenter, 
                        label = .data$original_FOV), 
           color = "black", size = 3.5, fontface = "bold"
         ) +
         ggplot2::coord_equal() +  
         ggplot2::theme_minimal() + 
-        ggplot2::labs(
-          title = paste("Slide:", current_slide, "| TMA Row:", c_row), 
-          fill = "Core Assignment"
-        ) +
+        ggplot2::labs(title = paste("Slide:", current_slide, "| TMA Row:", c_row), 
+                      fill = "FOV Core Assignment", color = "Cell Assignment") +
         ggplot2::theme(legend.position = "right")
       
       plot_list[[paste0("Row_", c_row)]] <- p
@@ -181,7 +247,5 @@ assign_fovs_to_cores <- function(fov_input, tma_map_input, fov_size = 4256, tol 
     all_plots[[current_slide]] <- plot_list
   }
   
-  final_mapped_data <- dplyr::bind_rows(all_mapped_data)
-  
-  return(list(mapped_data = final_mapped_data, plots = all_plots))
+  return(list(mapped_data = dplyr::bind_rows(all_mapped_data), plots = all_plots))
 }
