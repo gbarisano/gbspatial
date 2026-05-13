@@ -453,6 +453,7 @@ run_spatial_qc <- function(counts,
   
   # --- 4. Cells Near FOV Borders QC ---
   if (do_FOV_boundary) {
+    if ("SplitRatioToLocal" %in% colnames(metadata)) {
     message("Running FOV Boundary QC...")
     flag_table$flag_boundary <- (metadata$SplitRatioToLocal > 0) & (metadata$SplitRatioToLocal < SplitRatioToLocalThreshold)
     
@@ -465,6 +466,9 @@ run_spatial_qc <- function(counts,
     # Custom labels for the Border vs Non-border pie
     p_pie <- make_qc_pie(metadata$SplitRatioToLocal > 0, "Non-border", "Border cell", fail_color = "steelblue")
     plots$fov_boundary <- p_detail + patchwork::inset_element(p_pie, left = 0.6, bottom = 0.6, right = 1.0, top = 1.0)
+      } else {
+      stop("metadata does not contain SplitRatioToLocal column, which is required for 'Cells Near FOV Borders QC'.")
+    }
   }
   
   # --- 5. Regional-level cell QC ---
