@@ -146,7 +146,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       polygons <- data.table::fread(file.path(current_path, thisslidespolygon))
       
       # Modify cell_ID to match metadata global_cell_ID format
-      polygons$cell_ID <- paste0("c_", slide_ID_numeric, "_", polygons$fov, "_", polygons$cell)
+      polygons$cell_ID <- paste0("c_", slide_ID_numeric, "_", polygons$fov, "_", polygons$cellID)
       
       # Add Run_Tissue_name
       polygons$Run_Tissue_name <- slidename
@@ -298,7 +298,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
                         tissue = metadata$Run_Tissue_name, 
                         tissueorder = NULL,  
                         buffer = 1, 
-                        widthheightratio = 4/3) 
+                        widthheightratio = 8/3) 
   
   # Optional: Plot tissues if requested
   if (plot_tissues) {
