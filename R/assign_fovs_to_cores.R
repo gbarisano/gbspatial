@@ -259,8 +259,7 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
       )
     
     res <- merge(fov, tma_map_long, by = c("core_col", "core_row", "core_str"), all.x = TRUE)
-    res$original_FOV <- res$FOV
-    res$FOV <- paste(res$slidename, res$original_FOV, sep = "_")
+
     
     # 10. Assign Cells
     cells_merged <- merge(cells, res[, c("original_FOV", "core_str")], by.x = "FOV", by.y = "original_FOV", all.x = TRUE)
