@@ -10,7 +10,7 @@
 #' @param widthheightratio Desired shape of final xy locations.
 #' @return A matrix of updated xy coordinates.
 #' @export
-condenseTissues <- function(xy, tissue, tissueorder = NULL, buffer = 0.2, widthheightratio = 4/3) {
+condenseTissues <- function(xy, tissue, tissueorder = NULL, buffer = 0.2, widthheightratio = 8/3) { #for runfovqc function to work properly, the slides must be all in a single row, so increase the widthheightratio if needed
   
   # get each tissue's dimensions:
   tissdf <- data.frame(tissue = unique(tissue))
