@@ -1,4 +1,4 @@
-# Copyright ©2024 Bruker Spatial Biology, Inc. All rights reserved. Subject to additional license terms and conditions provided separately by Bruker Spatial Biology, Inc.
+# Part of this code has copyright ©2024 Bruker Spatial Biology, Inc. All rights reserved. Subject to additional license terms and conditions provided separately by Bruker Spatial Biology, Inc.
 #' Arrange tissues in xy space to reduce whitespace
 #' 
 #' Uses a shelf algorithm: places tallest tissues on the bottom shelf, and so on. 
@@ -77,17 +77,17 @@ condenseTissues <- function(xy, tissue, tissueorder = NULL, buffer = 0.2, widthh
 #' Data Preparation for CosMx
 #'
 #' Processes raw CosMx flat files into a structured object containing count matrices,
-#' metadata, and condensed spatial coordinates.
+#' metadata, polygons, and condensed spatial coordinates.
 #'
 #' @param myflatfiledir A character vector of one or more directories containing CosMx slide folders.
 #' @param plot_tissues Logical. If TRUE, plots the condensed tissue layouts. Default is FALSE.
-#' @return A list containing `"counts"`, `"negcounts"`, `"falsecounts"`, `"metadata"`, and `"xy"`.
+#' @return A list containing `"counts"`, `"negcounts"`, `"falsecounts"`, `"metadata"`, `"xy"`, and `"polygons"`.
 #' @importFrom data.table fread rbindlist
 #' @importFrom Matrix Matrix
 #' @importFrom methods as
 #' @importFrom utils txtProgressBar setTxtProgressBar
-#' @importFrom graphics plot text
-#' @importFrom stats median
+#' @importFrom graphics plot text recordPlot
+#' @importFrom stats median ave
 #' @export
 dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   
@@ -108,9 +108,10 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   #make unique slidenames if duplicates
   slidenames=ave(slidenames, slidenames, FUN = \(v) ifelse(seq_along(v) == 1,v,paste0(v, "-", seq_along(v))))
   
-  # Lists to collect the counts matrices and metadata, one per slide
+  # Lists to collect the counts matrices, metadata, and polygons, one per slide
   countlist <- vector(mode = 'list', length = length(slide_paths)) 
   metadatalist <- vector(mode = 'list', length = length(slide_paths)) 
+  polygonlist <- vector(mode = 'list', length = length(slide_paths))
   
   for(i in seq_along(slide_paths)) {
     
@@ -133,27 +134,43 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
     tempdatatable$slidename <- slidename
     
     # numeric slide ID 
-    #slide_ID_numeric <- tempdatatable[1,]$slide_ID
     slide_ID_numeric <- i
     tempdatatable$slide_ID_numeric <- i
     
     # global cell ID 
     tempdatatable$global_cell_ID <- paste0("c_", slide_ID_numeric, "_", tempdatatable$fov, "_", tempdatatable$cell_ID)
 
-    # Create SplitRatioToLocal if it does not exist (this is useful metric for QC of cells near FOV boundaries)
-    if (!"SplitRatioToLocal" %in% names(tempdatatable) || all(is.na(tempdatatable$SplitRatioToLocal))) {
-      thisslidespolygon <- thisslidesfiles[grepl("polygons", thisslidesfiles)]
-      if (length(thisslidespolygon) != 0) {
-      polygons=data.table::fread(file.path(current_path, thisslidespolygon))
-        boundarycells=unique(polygons$cell[polygons$x_local_px %in% c(min(polygons$x_local_px), max(polygons$x_local_px)) | polygons$y_local_px %in% c(min(polygons$y_local_px), max(polygons$y_local_px))]) #in some cases local_px may go from 0 to 4255, some other cases may go from 1 to 4254
-        #tempdatatable <- tempdatatable[, c(.SD, .(SplitRatioToLocal = if (any(cell_id %in% boundarycells)) {round(Area / mean(Area), 2)} else {0})), by = fov]
-
-        has_boundary <- tempdatatable$cell_id %in% boundarycells #Check if the group contains a boundary cell (returns a logical vector)
-        mean_area <- ave(tempdatatable$Area, tempdatatable$fov, FUN = mean) #Calculate the mean area per group
+    # ALWAYS load polygons if available
+    thisslidespolygon <- thisslidesfiles[grepl("polygons", thisslidesfiles)]
+    if (length(thisslidespolygon) != 0) {
+      polygons <- data.table::fread(file.path(current_path, thisslidespolygon))
+      
+      # Modify cell_ID to match metadata global_cell_ID format
+      polygons$cell_ID <- paste0("c_", slide_ID_numeric, "_", polygons$fov, "_", polygons$cell)
+      
+      # Add Run_Tissue_name
+      polygons$Run_Tissue_name <- slidename
+      
+      # Add global FOV
+      polygons$FOV <- paste0("s", slide_ID_numeric, "f", polygons$fov)
+      
+      # Save to list
+      polygonlist[[i]] <- polygons
+      
+      # Create SplitRatioToLocal if it does not exist 
+      if (!"SplitRatioToLocal" %in% names(tempdatatable) || all(is.na(tempdatatable$SplitRatioToLocal))) {
+        boundarycells=unique(polygons$cell[polygons$x_local_px %in% c(min(polygons$x_local_px), max(polygons$x_local_px)) | polygons$y_local_px %in% c(min(polygons$y_local_px), max(polygons$y_local_px))])
+        has_boundary <- tempdatatable$cell_id %in% boundarycells 
+        mean_area <- ave(tempdatatable$Area, tempdatatable$fov, FUN = mean) 
         tempdatatable$SplitRatioToLocal <- ifelse(has_boundary, round(tempdatatable$Area / mean_area, 2), 0)
-        } else {
-        Message(paste("No polygon file found for", slidename,", which would be needed to generate SplitRatioToLocal which is not present in its corresponding metadata file", thisslidemetadata))
-        }
+      }
+      
+    } else {
+      # Fallback if no polygon file exists
+      message(paste("No polygon file found for", slidename))
+      if (!"SplitRatioToLocal" %in% names(tempdatatable) || all(is.na(tempdatatable$SplitRatioToLocal))) {
+        message("Cannot generate SplitRatioToLocal because the polygon file is missing.")
+      }
     }
     
     # load in counts as a data table:
@@ -203,7 +220,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       # Define columns to keep by subtracting fov and cell_ID safely
       cols_to_keep <- setdiff(colnames(countsdatatable), c("fov", "cell_ID"))
       
-      # FIX: Create base matrix, enforce numeric mode, and use Matrix() constructor
+      # Create base matrix, enforce numeric mode, and use Matrix() constructor
       dense_mat <- as.matrix(countsdatatable[, cols_to_keep, with = FALSE])
       mode(dense_mat) <- "numeric"
       sub_counts_matrix[[chunkid]] <- Matrix::Matrix(dense_mat, sparse = TRUE)
@@ -239,6 +256,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   
   counts <- do.call(rbind, countlist)
   metadata <- data.table::rbindlist(metadatalist)
+  polygons_all <- data.table::rbindlist(polygonlist, fill = TRUE)
   
   # add to metadata: add a global non-slide-specific FOV ID:
   metadata$FOV <- paste0("s", metadata$slide_ID_numeric, "f", metadata$fov)
@@ -253,6 +271,8 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   um_per_px <- 0.120280945 # dimension of each pixel in micro-meter
   metadata$x_slide_mm <- um_per_px * metadata$CenterX_global_px / 1e3 
   metadata$y_slide_mm <- um_per_px * metadata$CenterY_global_px / 1e3
+  polygons_all$x_slide_mm <- um_per_px * polygons_all$x_global_px / 1e3 
+  polygons_all$y_slide_mm <- um_per_px * polygons_all$y_global_px / 1e3
   
   # isolate negative control matrices:
   negcounts <- counts[, grepl("Negative", colnames(counts)), drop = FALSE]
@@ -303,6 +323,7 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
     falsecounts = falsecounts,
     metadata = metadata,
     xy = xy,
+    polygons = polygons_all,
     condensed_tissue_plot = if (exists("condensed_tissue_plot")) condensed_tissue_plot else NULL
   )
   
