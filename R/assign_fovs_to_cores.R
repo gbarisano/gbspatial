@@ -18,9 +18,10 @@
 #' 
 #' @importFrom dplyr mutate group_by ungroup bind_rows row_number select summarise left_join coalesce slice_sample filter slice_max
 #' @importFrom tidyr pivot_longer
-#' @importFrom ggplot2 ggplot geom_rect geom_text geom_point geom_hline geom_vline aes coord_equal theme_minimal labs theme scale_x_continuous scale_y_continuous expansion element_text element_blank
+#' @importFrom ggplot2 ggplot geom_rect geom_text geom_point geom_hline geom_vline aes coord_equal theme_minimal labs theme scale_x_continuous scale_y_continuous expansion element_text element_blank scale_fill_manual
 #' @importFrom stats dist
 #' @importFrom utils read.csv
+#' @importFrom Polychrome palette36.colors
 #' @export
 assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size = 4256, 
                                  core_drift_tolerance = 0.40, min_cells = 50, slidelabels = NULL) {
@@ -52,6 +53,9 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
   
   all_mapped_data <- list()
   all_plots <- list()
+  
+  # Fetch Polychrome palette once
+  poly_colors <- unname(Polychrome::palette36.colors())
   
   for (i in seq_len(n_slides)) {
     current_slide <- slide_names[i]
@@ -86,11 +90,11 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
     v_lines <- seq(xmin_global, xmax_global, by = xinter)
     h_lines <- seq(ymin_global, ymax_global, by = yinter)
     
-    # The true unadjusted grid anchors
+    # The true unadjusted grid anchors (Y axis now grows upward from ymin_global)
     grid_anchors <- expand.grid(core_col = 1:n_cols, core_row = 1:n_rows) |>
       dplyr::mutate(
         anchor_x = xmin_global + (.data$core_col - 0.5) * xinter,
-        anchor_y = ymax_global - (.data$core_row - 0.5) * yinter,
+        anchor_y = ymin_global + (.data$core_row - 0.5) * yinter,
         core_str = paste0("C", .data$core_col, "R", .data$core_row)
       )
     
@@ -266,9 +270,9 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
     
     plot_list <- list()
     
-    # 11. Prepare axes formatting for labels
+    # 11. Prepare axes formatting for labels (y_breaks also updated to grow upward)
     x_breaks <- xmin_global + (1:n_cols - 0.5) * xinter
-    y_breaks <- ymax_global - (1:n_rows - 0.5) * yinter
+    y_breaks <- ymin_global + (1:n_rows - 0.5) * yinter
     x_labels <- paste0("C", 1:n_cols)
     y_labels <- paste0("R", 1:n_rows)
     
@@ -303,6 +307,7 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
       ) +
       ggplot2::scale_x_continuous(breaks = x_breaks, labels = x_labels, expand = ggplot2::expansion(mult = 0.05)) +
       ggplot2::scale_y_continuous(breaks = y_breaks, labels = y_labels, expand = ggplot2::expansion(mult = 0.05)) +
+      ggplot2::scale_fill_manual(values = rep(poly_colors, length.out = n_cols)) +
       ggplot2::coord_equal() +  
       ggplot2::theme_minimal() + 
       ggplot2::labs(title = paste("Whole Slide Overview (By Column):", current_slide),
@@ -339,6 +344,7 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
       ) +
       ggplot2::scale_x_continuous(breaks = x_breaks, labels = x_labels, expand = ggplot2::expansion(mult = 0.05)) +
       ggplot2::scale_y_continuous(breaks = y_breaks, labels = y_labels, expand = ggplot2::expansion(mult = 0.05)) +
+      ggplot2::scale_fill_manual(values = rep(poly_colors, length.out = n_rows)) +
       ggplot2::coord_equal() +  
       ggplot2::theme_minimal() + 
       ggplot2::labs(title = paste("Whole Slide Overview (By Row):", current_slide),
