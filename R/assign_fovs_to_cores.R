@@ -90,11 +90,11 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
     v_lines <- seq(xmin_global, xmax_global, by = xinter)
     h_lines <- seq(ymin_global, ymax_global, by = yinter)
     
-    # The true unadjusted grid anchors (Y axis now grows upward from ymin_global)
+    # The true unadjusted grid anchors (Y axis restored to grow downward from ymax_global)
     grid_anchors <- expand.grid(core_col = 1:n_cols, core_row = 1:n_rows) |>
       dplyr::mutate(
         anchor_x = xmin_global + (.data$core_col - 0.5) * xinter,
-        anchor_y = ymin_global + (.data$core_row - 0.5) * yinter,
+        anchor_y = ymax_global - (.data$core_row - 0.5) * yinter,
         core_str = paste0("C", .data$core_col, "R", .data$core_row)
       )
     
@@ -270,9 +270,9 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
     
     plot_list <- list()
     
-    # 11. Prepare axes formatting for labels (y_breaks also updated to grow upward)
+    # 11. Prepare axes formatting for labels (Restored Y logic)
     x_breaks <- xmin_global + (1:n_cols - 0.5) * xinter
-    y_breaks <- ymin_global + (1:n_rows - 0.5) * yinter
+    y_breaks <- ymax_global - (1:n_rows - 0.5) * yinter
     x_labels <- paste0("C", 1:n_cols)
     y_labels <- paste0("R", 1:n_rows)
     
