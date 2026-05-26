@@ -255,7 +255,8 @@ assign_fovs_to_cores <- function(fov_input, cell_input, tma_map_input, fov_size 
     # 9. Merge with Clinical IDs
     colnames(tma_map_df) <- 1:n_cols
     tma_map_long <- tma_map_df |>
-      dplyr::mutate(core_row = rev(dplyr::row_number())) |> 
+      #dplyr::mutate(core_row = rev(dplyr::row_number())) |> 
+      dplyr::mutate(core_row = dplyr::row_number()) |> 
       tidyr::pivot_longer(cols = -.data$core_row, names_to = "core_col", values_to = "id") |>
       dplyr::mutate(
         core_col = as.numeric(.data$core_col),
