@@ -82,7 +82,7 @@ condenseTissues <- function(xy, tissue, tissueorder = NULL, buffer = 0.2, widthh
 #' @param myflatfiledir A character vector of one or more directories containing CosMx slide folders.
 #' @param plot_tissues Logical. If TRUE, plots the condensed tissue layouts. Default is FALSE.
 #' @return A list containing `"counts"`, `"negcounts"`, `"falsecounts"`, `"metadata"`, `"xy"`, and `"polygons"`.
-#' @importFrom data.table fread rbindlist
+#' @importFrom data.table fread rbindlist setDF
 #' @importFrom Matrix Matrix
 #' @importFrom methods as
 #' @importFrom utils txtProgressBar setTxtProgressBar
@@ -221,7 +221,8 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
       cols_to_keep <- setdiff(colnames(countsdatatable), c("fov", "cell_ID"))
       
       # Create base matrix, enforce numeric mode, and use Matrix() constructor
-      dense_mat <- as.matrix(countsdatatable[, cols_to_keep, with = FALSE])
+      data.table::setDF(countsdatatable)
+      dense_mat <- as.matrix(countsdatatable[, cols_to_keep, drop = FALSE])
       mode(dense_mat) <- "numeric"
       sub_counts_matrix[[chunkid]] <- Matrix::Matrix(dense_mat, sparse = TRUE)
       rownames(sub_counts_matrix[[chunkid]]) <- slide_fov_cell_counts 
@@ -250,7 +251,8 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   
   # reduce to shared metadata columns and shared genes
   for(i in seq_along(slide_paths)) {
-    metadatalist[[i]] <- metadatalist[[i]][, sharedcolumns, with = FALSE]
+    data.table::setDF(metadatalist[[i]])
+    metadatalist[[i]] <- metadatalist[[i]][, sharedcolumns, drop = FALSE]
     countlist[[i]] <- countlist[[i]][, sharedgenes, drop = FALSE]
   }
   
@@ -282,7 +284,8 @@ dataprep_cosmx <- function(myflatfiledir, plot_tissues = FALSE) {
   counts <- counts[, !grepl("Negative", colnames(counts)) & !grepl("SystemControl", colnames(counts)), drop = FALSE]
   
   # Then break out cells' xy positions in a distinct data object:
-  xy <- as.matrix(metadata[, c("CenterX_global_px", "CenterY_global_px"), with = FALSE])
+  xy <- cbind(CenterX_global_px = metadata$CenterX_global_px, 
+              CenterY_global_px = metadata$CenterY_global_px)
   
   # Use the generated global_cell_ID for rownames to ensure accuracy 
   rownames(xy) <- metadata$cell_ID
