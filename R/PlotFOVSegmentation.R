@@ -56,6 +56,30 @@ suppressPackageStartupMessages({
 #'               Defaults to 0.
 #' @param flip One of "none", "horizontal", "vertical", or "both". Mirrors the whole plot before rotation.
 #'             Combined with \code{rotate}, this covers every orientation/reflection. Defaults to "none".
+#' @param return_plots Logical. If TRUE, the ggplot object(s) are collected and returned as a named list
+#'             (keys like "<image>_FOV_<fov>" per FOV, or "<image>_stitched" when \code{stitch=TRUE}), so they
+#'             can be captured with \code{p <- PlotFOVSegmentation(...)} and further modified or re-saved.
+#'             Defaults to FALSE (returns invisible NULL, as before).
+#' @param save_png Logical. If TRUE, PNG files are written to \code{out_dir} (original behavior). Set FALSE to skip
+#'             writing files, e.g. when you only want the returned objects. Defaults to TRUE.
+#' @param show_plot Logical. If TRUE, each plot is printed (rendered in the RStudio Plots pane). Set FALSE to avoid
+#'             the slow rendering when you only want to capture or save the plots. Defaults to TRUE.
+#' @param extra_polygons Optional data.frame of additional polygons to overlay on every plot (e.g. areas of
+#'             interest). Provide the coordinates in their raw frame; the function runs them through the same pipeline
+#'             as the cells so they stay aligned. Defaults to NULL (no overlay).
+#' @param extra_polygons_group Column in \code{extra_polygons} identifying each polygon (the ggplot group).
+#'             Defaults to "aoi_id".
+#' @param extra_polygons_coords Length-2 character vector naming the x and y columns in \code{extra_polygons}.
+#'             Defaults to c("x", "y").
+#' @param extra_polygons_color,extra_polygons_fill,extra_polygons_linewidth,extra_polygons_alpha Aesthetics for the
+#'             overlay outline/fill. Defaults: red outline, no fill, linewidth 1, alpha 1.
+#' @param extra_polygons_invert_x,extra_polygons_invert_y,extra_polygons_divide_by_1000 Coordinate conversion applied
+#'             to \code{extra_polygons} BEFORE the shared flip/rotate, to bring them into the object's frame. These
+#'             should match what was used when importing the cell polygons; defaults (invert_y = TRUE,
+#'             divide_by_1000 = TRUE, invert_x = FALSE) match \code{TransferPolygonsToSeurat}'s defaults.
+#' @param extra_polygons_shift Length-2 numeric c(dx, dy) added to the overlay AFTER all transforms, in final plot
+#'             units (mm). Use this to nudge out any small residual offset between the AOI and segmentation sources.
+#'             Defaults to c(0, 0).
 #' @importFrom dplyr %>%
 #' @return Invisible NULL. Saves PNG files to the specified directory.
 #' @export
@@ -80,7 +104,21 @@ PlotFOVSegmentation <- function(seurat_obj,
                                 stitch = FALSE,
                                 id_col = NULL,
                                 rotate = 0,
-                                flip = "none") {
+                                flip = "none",
+                                return_plots = FALSE,
+                                save_png = TRUE,
+                                show_plot = TRUE,
+                                extra_polygons = NULL,
+                                extra_polygons_group = "aoi_id",
+                                extra_polygons_coords = c("x", "y"),
+                                extra_polygons_color = "red",
+                                extra_polygons_fill = NA,
+                                extra_polygons_linewidth = 1,
+                                extra_polygons_alpha = 1,
+                                extra_polygons_invert_x = FALSE,
+                                extra_polygons_invert_y = TRUE,
+                                extra_polygons_divide_by_1000 = TRUE,
+                                extra_polygons_shift = c(0, 0)) {
 
   # Helper to handle parameters that can be a single comma-separated string OR a vector
   parse_list_param <- function(param) {
@@ -145,6 +183,44 @@ PlotFOVSegmentation <- function(seurat_obj,
     p + ggplot2::annotation_custom(grob,
                                    xmin = nc$x - w / 2, xmax = nc$x + w / 2,
                                    ymin = nc$y - h / 2, ymax = nc$y + h / 2)
+  }
+
+  # Helper: overlay user-supplied polygons (e.g. areas of interest), running them through the
+  # SAME pipeline as the cells so they stay aligned: (1) optional invert x / y, (2) optional
+  # divide-by-1000 (raw import-style conversion into the object's coordinate frame), (3) the
+  # same flip/rotate about the shared pivot (cx, cy), (4) an optional (dx, dy) shift in final
+  # plot units. Drawn on top of the cells; clipped by the plot's coord limits like everything else.
+  .gb_add_extra_polys <- function(p, ep, angle_deg, flip, cx, cy) {
+    if (is.null(ep)) return(p)
+    xcol <- extra_polygons_coords[1]; ycol <- extra_polygons_coords[2]
+    if (!all(c(xcol, ycol, extra_polygons_group) %in% names(ep))) {
+      warning("extra_polygons must contain the columns '", xcol, "', '", ycol, "' and '",
+              extra_polygons_group, "'. Skipping the overlay.")
+      return(p)
+    }
+    epx <- if (isTRUE(extra_polygons_invert_x)) -1 else 1
+    epy <- if (isTRUE(extra_polygons_invert_y)) -1 else 1
+    epd <- if (isTRUE(extra_polygons_divide_by_1000)) 1000 else 1
+    df <- data.frame(
+      x   = epx * as.numeric(ep[[xcol]]) / epd,
+      y   = epy * as.numeric(ep[[ycol]]) / epd,
+      grp = ep[[extra_polygons_group]],
+      stringsAsFactors = FALSE
+    )
+    df <- df[stats::complete.cases(df[, c("x", "y")]), , drop = FALSE]
+    if (nrow(df) == 0) return(p)
+    if (angle_deg %% 360 != 0 || flip != "none") {
+      tp <- .gb_transform_pts(df$x, df$y, angle_deg, flip, cx, cy)
+      df$x <- tp$x; df$y <- tp$y
+    }
+    df$x <- df$x + extra_polygons_shift[1]
+    df$y <- df$y + extra_polygons_shift[2]
+    p + ggplot2::geom_polygon(
+      data = df, ggplot2::aes(x = x, y = y, group = grp),
+      fill = extra_polygons_fill, color = extra_polygons_color,
+      linewidth = extra_polygons_linewidth, alpha = extra_polygons_alpha,
+      inherit.aes = FALSE
+    )
   }
 
   do_transform <- (rotate %% 360 != 0) || (flip != "none")
@@ -370,6 +446,9 @@ PlotFOVSegmentation <- function(seurat_obj,
   user_fovs <- fovs
 
   # 3. Iterate over each Image FIRST, then the FOVs corresponding to that image
+  # Collector for returned ggplot objects (used when return_plots = TRUE)
+  plot_list <- list()
+
   for (img in global_target_images) {
     if (!img %in% Seurat::Images(seurat_obj)) {
       warning(paste("Image", img, "not found in Seurat object - Skipping."))
@@ -642,6 +721,9 @@ PlotFOVSegmentation <- function(seurat_obj,
         p <- p + ggplot2::scale_fill_manual(values = global_color_map, name = fill_col)
       }
 
+      # Overlay any user-supplied polygons (areas of interest), transformed to match the cells
+      p <- .gb_add_extra_polys(p, extra_polygons, rotate, flip, piv_cx, piv_cy)
+
       # Add customizations and theme
       p <- p +
         ggplot2::annotate("segment", x = x_start, xend = x_end, y = y_pos, yend = y_pos,
@@ -675,16 +757,21 @@ PlotFOVSegmentation <- function(seurat_obj,
         legend.title = ggplot2::element_text(color = "white"),
         legend.key = ggplot2::element_rect(fill = "black")
       )
-      print(p) #it does not slow-down the job on bash/command line, but it does slow down when launching on the R console in R studio because of the rendering of the image in the "Plots" window
-      #it will create a file Rplots.pdf where all plots will be visible.
+      if (isTRUE(show_plot)) {
+        print(p) # renders in the RStudio Plots pane (can be slow); set show_plot=FALSE to skip
+      }
+
+      # Collect the plot object if requested
+      if (isTRUE(return_plots)) {
+        plot_list[[paste0(img, "_FOV_", current_fov)]] <- p
+      }
 
       # 6. Save the plot
-      filename <- file.path(out_dir, paste0(img,"_FOV_", current_fov, img, "_segmentation.png"))
-      ggplot2::ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black", dpi = 300)
-      #filename <- file.path(out_dir, paste0("FOV_", current_fov, "_", img, "_segmentation.pdf"))
-      #ggplot2::ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black")
-      #print(nrow(coords))
-      message(paste("Saved:", filename))
+      if (isTRUE(save_png)) {
+        filename <- file.path(out_dir, paste0(img,"_FOV_", current_fov, img, "_segmentation.png"))
+        ggplot2::ggsave(filename = filename, plot = p, width = 8, height = 8, bg = "black", dpi = 300)
+        message(paste("Saved:", filename))
+      }
     }
 
     # ==================== STITCHED RENDER (once per image) ====================
@@ -795,6 +882,9 @@ PlotFOVSegmentation <- function(seurat_obj,
           p <- p + ggplot2::scale_fill_manual(values = global_color_map, name = fill_col)
         }
 
+        # Overlay any user-supplied polygons (areas of interest), transformed to match the cells
+        p <- .gb_add_extra_polys(p, extra_polygons, rotate, flip, piv_cx, piv_cy)
+
         # Build a compact, sorted FOV label for the title/filename
         fov_numeric <- suppressWarnings(as.numeric(names(stitch_coords_list)))
         if (any(is.na(fov_numeric))) {
@@ -835,7 +925,13 @@ PlotFOVSegmentation <- function(seurat_obj,
           legend.key = ggplot2::element_rect(fill = "black")
         )
 
-        print(p)
+        if (isTRUE(show_plot)) {
+          print(p)
+        }
+
+        if (isTRUE(return_plots)) {
+          plot_list[[paste0(img, "_stitched")]] <- p
+        }
 
         # Size the canvas to the montage aspect ratio so tiles are not letter-boxed
         base_dim <- 12
@@ -843,16 +939,25 @@ PlotFOVSegmentation <- function(seurat_obj,
         out_w <- max(4, min(base_dim, 40))
         out_h <- max(4, min(base_dim * aspect, 40))
 
-        safe_label <- gsub("[^0-9A-Za-z]+", "-", fov_label)
-        filename <- file.path(out_dir, paste0(img, "_stitched_FOVs_", safe_label, "_segmentation.png"))
-        ggplot2::ggsave(filename = filename, plot = p, width = out_w, height = out_h,
-                        bg = "black", dpi = 300, limitsize = FALSE)
-        message(paste("Saved stitched:", filename))
+        if (isTRUE(save_png)) {
+          safe_label <- gsub("[^0-9A-Za-z]+", "-", fov_label)
+          filename <- file.path(out_dir, paste0(img, "_stitched_FOVs_", safe_label, "_segmentation.png"))
+          ggplot2::ggsave(filename = filename, plot = p, width = out_w, height = out_h,
+                          bg = "black", dpi = 300, limitsize = FALSE)
+          message(paste("Saved stitched:", filename))
+        }
       }
     }
   }
 
   message("Pipeline complete.")
+
+  if (isTRUE(return_plots)) {
+    # If exactly one plot was produced, return it directly for convenience; else a named list.
+    if (length(plot_list) == 1L) return(invisible(plot_list[[1]]))
+    return(invisible(plot_list))
+  }
+  invisible(NULL)
 }
 
 # ==============================================================================
