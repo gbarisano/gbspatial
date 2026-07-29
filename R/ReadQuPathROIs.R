@@ -172,8 +172,9 @@ ReadQuPathROIs <- function(json_file,
 #'
 #' @param aoi data.frame of ROI vertices with columns \code{aoi_id}, x, y (as returned by \code{ReadQuPathROIs}).
 #' @param cell_polygons Either a data.frame of cell polygon vertices (one row per vertex) with a cell-ID column and
-#'   x/y columns, or a Seurat object (coordinates are pulled via \code{GetTissueCoordinates}). Coordinates MUST be in
-#'   the same frame/units as \code{aoi}.
+#'   x/y columns, or a Seurat object. For a Seurat object, coordinates are pulled from the FOV whose name matches
+#'   \code{slide} (one FOV per slide, as created by \code{TransferPolygonsToSeurat}); if no \code{slide} is given, all
+#'   FOVs are combined. Coordinates MUST be in the same frame/units as \code{aoi}.
 #' @param cell_id_col Name of the cell identifier column in \code{cell_polygons}. Default "cell_ID".
 #' @param aoi_id_col Name of the ROI identifier column in \code{aoi}. Default "aoi_id".
 #' @param coords Length-2 character vector naming the x and y columns. Default c("x", "y").
@@ -199,12 +200,32 @@ AssignCellsToAOIs <- function(aoi, cell_polygons,
   if (!requireNamespace("dplyr", quietly = TRUE)) stop("Package 'dplyr' is required for cell-to-AOI assignment.")
   xcol <- coords[1]; ycol <- coords[2]
 
-  # Pull polygon vertices out of a Seurat object if needed
+  # Pull polygon vertices out of a Seurat object if needed. A Seurat object can hold several FOVs
+  # (one per slide, as named by TransferPolygonsToSeurat), and GetTissueCoordinates() on the whole
+  # object returns only the default FOV. So when a `slide` is given we extract from the FOV whose
+  # name matches it; otherwise we combine all FOVs.
   if (inherits(cell_polygons, "Seurat")) {
     if (!requireNamespace("SeuratObject", quietly = TRUE)) {
       stop("Package 'SeuratObject' is required to extract polygons from a Seurat object.")
     }
-    cp <- SeuratObject::GetTissueCoordinates(cell_polygons)
+    imgs <- SeuratObject::Images(cell_polygons)
+    if (length(imgs) == 0) stop("The Seurat object has no spatial FOV/Images to extract coordinates from.")
+    pick <- if (!is.null(slide) && as.character(slide) %in% imgs) {
+      as.character(slide)
+    } else if (length(imgs) == 1L) {
+      imgs
+    } else {
+      NULL
+    }
+    if (!is.null(pick)) {
+      cp <- SeuratObject::GetTissueCoordinates(cell_polygons[[pick]])
+    } else {
+      if (!is.null(slide)) {
+        warning("No FOV named '", slide, "' in the object (Images: ", paste(imgs, collapse = ", "),
+                "). Combining all FOVs instead.")
+      }
+      cp <- do.call(rbind, lapply(imgs, function(im) SeuratObject::GetTissueCoordinates(cell_polygons[[im]])))
+    }
     names(cp)[names(cp) %in% c("cell", "cells")] <- cell_id_col
     cell_polygons <- cp
   }
