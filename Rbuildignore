@@ -1,0 +1,10 @@
+^gbspatial\.Rproj$
+^\.Rproj\.user$
+^\.positai$
+^\.claude$
+^README\.Rmd$
+^LICENSE\.md$
+^data/DecodedFiles
+^data/flatFiles
+^\.github$
+^FOV_.*\.png$
