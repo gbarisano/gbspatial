@@ -1,16 +1,3 @@
-#!/usr/bin/env Rscript
-
-# Load required libraries if ran on terminal through Rscript
-suppressPackageStartupMessages({
-  library(optparse)
-  library(Seurat)
-  library(ggplot2)
-  library(dplyr)
-  library(tibble)
-  library(jpeg)
-  library(Polychrome)
-})
-
 #' Plot Spatial Transcriptomics Segmentation by FOV
 #'
 #' @param seurat_obj A Seurat spatial object.
