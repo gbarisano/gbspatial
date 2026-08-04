@@ -1,4 +1,5 @@
 
+[![R-CMD-check](https://github.com/gbarisano/gbspatial/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/gbarisano/gbspatial/actions/workflows/R-CMD-check.yaml)
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
 # gbspatial
