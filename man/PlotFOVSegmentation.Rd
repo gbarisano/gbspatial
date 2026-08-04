@@ -19,8 +19,28 @@ PlotFOVSegmentation(
   img_interval = 0.5119157,
   alpha = NULL,
   fov_pos_file = NULL,
+  clusters_show = NULL,
+  clusters_fill = NULL,
   cells_show = NULL,
-  cells_fill = NULL
+  cells_fill = NULL,
+  stitch = FALSE,
+  id_col = NULL,
+  rotate = 0,
+  flip = "none",
+  return_plots = FALSE,
+  save_png = TRUE,
+  show_plot = TRUE,
+  extra_polygons = NULL,
+  extra_polygons_group = "aoi_id",
+  extra_polygons_coords = c("x", "y"),
+  extra_polygons_color = "red",
+  extra_polygons_fill = NA,
+  extra_polygons_linewidth = 1,
+  extra_polygons_alpha = 1,
+  extra_polygons_invert_x = FALSE,
+  extra_polygons_invert_y = TRUE,
+  extra_polygons_divide_by_1000 = TRUE,
+  extra_polygons_shift = c(0, 0)
 )
 }
 \arguments{
@@ -55,9 +75,72 @@ the second specifically for show filtering. If NULL, defaults to Seurat::Idents(
 
 \item{fov_pos_file}{Comma-separated list or vector of paths to CosMx fov_positions_file.csv.gz. Must match the number and order of images.}
 
-\item{cells_show}{Comma-separated string or vector of cell names to explicitly plot. Others will be ignored.}
+\item{clusters_show}{Comma-separated string or vector of category values (e.g. cell-type / cluster names) to
+explicitly plot. Matched against the show column (the fill column, or its second element if two are
+supplied via \code{fill}). Cells not in this set are dropped. Was previously named \code{cells_show}.}
 
-\item{cells_fill}{Comma-separated string or vector of cell names to fill. Others will be drawn as empty polygons.}
+\item{clusters_fill}{Comma-separated string or vector of category values to fill. Matched against the fill column.
+Cells not in this set are drawn as empty (unfilled) outlines. Was previously named \code{cells_fill}.}
+
+\item{cells_show}{Vector (or comma-separated string) of individual cell IDs to explicitly plot. Cells whose ID is
+not in this set are dropped. IDs are matched against \code{id_col} if supplied, otherwise the cell
+names (barcodes / rownames), with auto-detection of the best-matching column as a fallback.}
+
+\item{cells_fill}{Vector (or comma-separated string) of individual cell IDs to fill. Cells whose ID is not in this
+set are drawn as empty outlines (unless they are selected by \code{clusters_fill}). Matched like
+\code{cells_show}.}
+
+\item{stitch}{Logical. If TRUE, all selected FOVs belonging to the same image are combined into a single
+stitched montage: every FOV's immunofluorescence tile is placed at its own global position and
+all segmentation polygons are overlaid on top, producing one PNG per image instead of one per FOV.
+Because cell coordinates and FOV image positions are already in a shared global coordinate frame,
+providing \code{fov_pos_file} is strongly recommended for accurate tile alignment when \code{img_dir}
+is used. Defaults to FALSE (original per-FOV behavior).}
+
+\item{id_col}{Optional name of the metadata column that \code{cells_show} / \code{cells_fill} IDs refer to
+(e.g. a barcode column such as "updated_cellID"). If omitted, IDs are matched against the cell names
+(rownames); if those don't match, the column whose values best cover the supplied IDs is auto-detected.
+Note: \code{clusters_show} / \code{clusters_fill} are unaffected by \code{id_col}.}
+
+\item{rotate}{Numeric. Rotation applied to the whole plot (raster tiles and overlaid polygons together), in
+degrees counter-clockwise. Any value is allowed (e.g. 90, 180, 270, or an arbitrary angle like 37).
+Defaults to 0.}
+
+\item{flip}{One of "none", "horizontal", "vertical", or "both". Mirrors the whole plot before rotation.
+Combined with \code{rotate}, this covers every orientation/reflection. Defaults to "none".}
+
+\item{return_plots}{Logical. If TRUE, the ggplot object(s) are collected and returned as a named list
+(keys like "\if{html}{\out{<image>}}\emph{FOV}\if{html}{\out{<fov>}}" per FOV, or "\if{html}{\out{<image>}}_stitched" when \code{stitch=TRUE}), so they
+can be captured with \code{p <- PlotFOVSegmentation(...)} and further modified or re-saved.
+Defaults to FALSE (returns invisible NULL, as before).}
+
+\item{save_png}{Logical. If TRUE, PNG files are written to \code{out_dir} (original behavior). Set FALSE to skip
+writing files, e.g. when you only want the returned objects. Defaults to TRUE.}
+
+\item{show_plot}{Logical. If TRUE, each plot is printed (rendered in the RStudio Plots pane). Set FALSE to avoid
+the slow rendering when you only want to capture or save the plots. Defaults to TRUE.}
+
+\item{extra_polygons}{Optional data.frame of additional polygons to overlay on every plot (e.g. areas of
+interest). Provide the coordinates in their raw frame; the function runs them through the same pipeline
+as the cells so they stay aligned. Defaults to NULL (no overlay).}
+
+\item{extra_polygons_group}{Column in \code{extra_polygons} identifying each polygon (the ggplot group).
+Defaults to "aoi_id".}
+
+\item{extra_polygons_coords}{Length-2 character vector naming the x and y columns in \code{extra_polygons}.
+Defaults to c("x", "y").}
+
+\item{extra_polygons_color, extra_polygons_fill, extra_polygons_linewidth, extra_polygons_alpha}{Aesthetics for the
+overlay outline/fill. Defaults: red outline, no fill, linewidth 1, alpha 1.}
+
+\item{extra_polygons_invert_x, extra_polygons_invert_y, extra_polygons_divide_by_1000}{Coordinate conversion applied
+to \code{extra_polygons} BEFORE the shared flip/rotate, to bring them into the object's frame. These
+should match what was used when importing the cell polygons; defaults (invert_y = TRUE,
+divide_by_1000 = TRUE, invert_x = FALSE) match \code{TransferPolygonsToSeurat}'s defaults.}
+
+\item{extra_polygons_shift}{Length-2 numeric c(dx, dy) added to the overlay AFTER all transforms, in final plot
+units (mm). Use this to nudge out any small residual offset between the AOI and segmentation sources.
+Defaults to c(0, 0).}
 }
 \value{
 Invisible NULL. Saves PNG files to the specified directory.
