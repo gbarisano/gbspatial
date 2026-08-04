@@ -10,18 +10,17 @@ Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
 Imports: 
     dplyr,
+    tidyr,
+    grDevices,
     data.table,
     Matrix,
-    methods,
     utils,
     graphics,
     stats,
     ggplot2,
     jpeg,
-    optparse,
     Polychrome,
     Seurat,
-    tibble,
     patchwork,
     dbscan,
     UpSetR,
@@ -35,7 +34,9 @@ Imports:
     glmmTMB,
     broom.mixed
 Suggests:
-   parallel
+    parallel,
+    optparse,
+    tibble
 URL: https://github.com/gbarisano/gbspatial
 BugReports: https://github.com/gbarisano/gbspatial/issues
 Depends: 
