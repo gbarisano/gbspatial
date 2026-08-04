@@ -7,6 +7,7 @@
 # ------------------------------------------------------------------------------
 
 #' FOV QC 
+#' @noRd
 runFOVQC <- function(counts, xy, fov, tissue = NULL, barcodemap, max_prop_loss = 0.6, max_totalcounts_loss = 0.6) {
   
   if ((max_prop_loss > 1) | (max_prop_loss < 0)) {
@@ -101,6 +102,7 @@ runFOVQC <- function(counts, xy, fov, tissue = NULL, barcodemap, max_prop_loss =
 }
 
 #' Infer colorvals from barcodes:
+#' @noRd
 getcolorvals <- function(barcodes) {
   allvals <- paste0(barcodes, collapse = "")
   uniquevals <- unique(unlist(strsplit(allvals, "")))
@@ -108,6 +110,7 @@ getcolorvals <- function(barcodes) {
 }
 
 #' Spatial plots of FOV effects:
+#' @noRd
 FOVEffectsSpatialPlots <- function(res, outdir = NULL, bits = "flagged_reportercycles", plotwidth = NULL, plotheight = NULL) {
   bitnames <- colnames(res$fovstats$p)
   colorvals <- unique(substr(bitnames, nchar(bitnames), nchar(bitnames)))
@@ -157,6 +160,7 @@ FOVEffectsSpatialPlots <- function(res, outdir = NULL, bits = "flagged_reporterc
 }
 
 #' Spatial plot of loss in signal strength compared to similar regions:
+#' @noRd
 FOVSignalLossSpatialPlot <- function(res, shownames = TRUE, outdir = NULL, plotwidth = NULL, plotheight = NULL) {
   if (!is.null(outdir)) {
     png(paste0(outdir, "/signal loss.png"), width = plotwidth, height = plotheight, units = "in", res = 300)
@@ -192,6 +196,7 @@ FOVSignalLossSpatialPlot <- function(res, shownames = TRUE, outdir = NULL, plotw
 }
 
 #' Map of which FOVs were flagged:
+#' @noRd
 mapFlaggedFOVs <- function(res, shownames = TRUE, outdir = NULL, plotwidth = NULL, plotheight = NULL) {
   if (!is.null(outdir)) {
     png(paste0(outdir, "/flagged FOVs.png"), width = plotwidth, height = plotheight, units = "in", res = 300)
@@ -223,6 +228,7 @@ mapFlaggedFOVs <- function(res, shownames = TRUE, outdir = NULL, plotwidth = NUL
 }
 
 #' Heatmap of estimated bit bias across FOVs
+#' @noRd
 FOVEffectsHeatmap <- function(res) {
   pheatmap::pheatmap(res$fovstats$bias * (res$fovstats$flag),
                      col = colorRampPalette(c("darkblue", "blue", "white", "red", "darkred"))(100),
@@ -231,6 +237,7 @@ FOVEffectsHeatmap <- function(res) {
 }
 
 #' Get nearest neighbors, sampling diffusely across other FOVs. 
+#' @noRd
 getNearestNeighborsByFOV <- function(x, gridfov, n_neighbors = 10) {
   gridfov <- gridfov[rownames(x)]
   topneighbors <- FNN::get.knnx(data = x, query = x, k = min(n_neighbors * 50, nrow(x)))$nn.index
@@ -244,6 +251,7 @@ getNearestNeighborsByFOV <- function(x, gridfov, n_neighbors = 10) {
 }
 
 #' Define a grid across FOVs 
+#' @noRd
 makeGrid <- function(xy, fov, squares_per_fov = 49, min_cells_per_square = 25) {
   ncuts <- floor(sqrt(squares_per_fov))
   grid <- rep(NA, nrow(xy))
@@ -259,6 +267,7 @@ makeGrid <- function(xy, fov, squares_per_fov = 49, min_cells_per_square = 25) {
 }
 
 #' Convert cell x gene matrix to grid square * bit matrix
+#' @noRd
 cellxgene2squarexbit <- function(counts, grid, genes, barcodes) {
   colorvals <- getcolorvals(barcodes)
   nreportercycles <- nchar(barcodes[1]) / 2
@@ -292,6 +301,7 @@ cellxgene2squarexbit <- function(counts, grid, genes, barcodes) {
 }
 
 #' Convert the barcode vector to a matrix of bit assignments (genes * bits)
+#' @noRd
 barcode2bitmatrix <- function(barcodes) {
   colorvals <- getcolorvals(barcodes)
   nreportercycles <- nchar(barcodes[1]) / 2
@@ -309,6 +319,7 @@ barcode2bitmatrix <- function(barcodes) {
 }
 
 #' Summarize bias in FOVs
+#' @noRd
 summarizeFOVBias <- function(resid, gridfov, max_prop_loss) {
   gridfov = gridfov[rownames(resid)]
   fovs = unique(gridfov)
