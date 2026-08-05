@@ -11,6 +11,10 @@
 #     grid (rows x cols, input order = fill order) with extra downsampling.
 #   * Optionally processes a co-registered H&E image per slide, forced onto the
 #     SAME spatial grid as the IF output so the two OME-TIFFs overlay exactly.
+#   * Optionally writes Minerva cell-polygon outputs, aligning the polygon
+#     coordinate frame to the FOV grid separately for each slide, so that both
+#     TransferPolygonsToSeurat() output and raw AtoMx/CosMx Seurat objects work
+#     without any manual offset tuning.
 #   * OME-XML is generated programmatically (correct dimensions, downsample-
 #     scaled physical pixel size, channel names/colours). No external XML file.
 # ==============================================================================
@@ -416,15 +420,133 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 
 # ---- polygon helpers ---------------------------------------------------------
 
+# Coerce a FOV column to integer, tolerating factors and names like "F003".
+.gb_as_fov_int <- function(x) {
+  v <- suppressWarnings(as.integer(as.character(x)))
+  if (all(is.na(v))) {
+    d <- gsub("[^0-9]", "", as.character(x))
+    v <- suppressWarnings(as.integer(ifelse(nzchar(d), d, NA)))
+  }
+  v
+}
+
+# Width (px) above which the fitted offset interval is considered untrustworthy.
+.gb_align_loose_px <- 400
+
+# Fit the polygon -> raster affine for one slide.
+#
+# .gb_merge_slide() places FOV f at X in [x0_f, x0_f + F] and
+# Y in [-y0_f - F, -y0_f], with F = fov_size_px. The only assumption made here
+# is that every vertex of a cell falls inside the box of the FOV that cell was
+# assigned to. For a candidate scale K and sign s, the offsets b satisfying that
+# for all vertices form an interval; its width scores the candidate. Scale
+# (mm/um/px), sign and offset are therefore all read off the data, which is what
+# lets both the TransferPolygonsToSeurat frame and the raw AtoMx
+# x_slide_mm/y_slide_mm frame work without manual tuning -- and, crucially,
+# lets each slide have its own offset.
+#
+#   d     : data.frame with columns x, y, fov (one row per polygon vertex)
+#   tiles : data.frame(FOV, x_px, y_px) from .gb_read_fov_positions()
+#   units : "auto", or one of "mm"/"um"/"px" to fix the scale
+#   trim  : trimming quantile for the feasibility bounds; guards against the few
+#           cells whose segmentation legitimately spills over a FOV edge (common
+#           after fastReseg, which can merge cells across FOV borders)
+#
+# Returns list(units, ax, bx, ay, by, width_x, width_y, score, inside, n), or
+# NULL when no vertex could be matched to a FOV. Raster coordinates are then
+# ax * x + bx and ay * y + by.
+.gb_fit_poly_align <- function(d, tiles, fov_size_px, pixel_size_um,
+                               units = "auto", trim = 0.002) {
+  if (is.null(d) || !nrow(d) || !"fov" %in% names(d)) return(NULL)
+  i  <- match(.gb_as_fov_int(d$fov), tiles$FOV)
+  ok <- !is.na(i) & is.finite(d$x) & is.finite(d$y)
+  if (!any(ok)) return(NULL)
+  d <- d[ok, , drop = FALSE]; i <- i[ok]
+
+  x_lo <- tiles$x_px[i];  x_hi <- x_lo + fov_size_px
+  y_hi <- -tiles$y_px[i]; y_lo <- y_hi - fov_size_px
+
+  fit1 <- function(p, lo, hi, K) {
+    best <- NULL
+    for (s in c(1, -1)) {
+      v    <- s * K * p
+      b_lo <- stats::quantile(lo - v, 1 - trim, names = FALSE, na.rm = TRUE)
+      b_hi <- stats::quantile(hi - v,     trim, names = FALSE, na.rm = TRUE)
+      cand <- list(a = s * K, b = (b_lo + b_hi) / 2, width = b_hi - b_lo)
+      if (is.null(best) || cand$width > best$width) best <- cand
+    }
+    best
+  }
+
+  all_scales <- c(mm = 1000 / pixel_size_um, um = 1 / pixel_size_um, px = 1)
+  scales <- if (identical(units, "auto")) all_scales else all_scales[units]
+
+  best <- NULL
+  for (nm in names(scales)) {
+    fx <- fit1(d$x, x_lo, x_hi, scales[[nm]])
+    fy <- fit1(d$y, y_lo, y_hi, scales[[nm]])
+    cand <- list(units = nm, ax = fx$a, bx = fx$b, ay = fy$a, by = fy$b,
+                 width_x = fx$width, width_y = fy$width,
+                 score = min(fx$width, fy$width))
+    if (is.null(best) || cand$score > best$score) best <- cand
+  }
+
+  xx <- best$ax * d$x + best$bx
+  yy <- best$ay * d$y + best$by
+  best$inside <- mean(xx >= x_lo & xx <= x_hi & yy >= y_lo & yy <= y_hi)
+  best$n <- nrow(d)
+  best
+}
+
+# Report a fit and warn when it looks unreliable.
+.gb_report_poly_align <- function(fit, slide, pixel_size_um, declared_units) {
+  if (is.null(fit)) {
+    warning("Could not fit a polygon frame for slide '", slide, "' (no vertex ",
+            "matched a FOV in the positions file). Check 'poly_fov_col'. ",
+            "Falling back to the manual poly_flip_y / poly_*_offset_px ",
+            "settings for this slide.", call. = FALSE)
+    return(invisible(NULL))
+  }
+  message(sprintf(
+    "  '%s': %s coords, %s vertices -- x_ras = %+.3f*x %+.1f, y_ras = %+.3f*y %+.1f",
+    slide, fit$units, format(fit$n, big.mark = ","),
+    fit$ax, fit$bx, fit$ay, fit$by))
+  message(sprintf(
+    "        offset pinned to +/-%.0f px in x, +/-%.0f px in y (%.1f / %.1f um); %.1f%% of vertices inside their own FOV",
+    max(fit$width_x, 0) / 2, max(fit$width_y, 0) / 2,
+    max(fit$width_x, 0) / 2 * pixel_size_um,
+    max(fit$width_y, 0) / 2 * pixel_size_um, 100 * fit$inside))
+
+  if (!identical(fit$units, declared_units))
+    message("        note: poly_coord_units = '", declared_units, "' was set, ",
+            "but '", fit$units, "' fits the FOV grid better; using '",
+            fit$units, "'.")
+  if (fit$inside < 0.9)
+    warning("Only ", sprintf("%.1f%%", 100 * fit$inside), " of polygon vertices ",
+            "for slide '", slide, "' land inside their own FOV after alignment. ",
+            "The FOV column may not correspond to the positions file, or the ",
+            "polygons may come from a different slide.", call. = FALSE)
+  if (min(fit$width_x, fit$width_y) < 0)
+    warning("For slide '", slide, "' no single offset satisfies every FOV (the ",
+            "cells overflow their boxes). The result is a best compromise; ",
+            "inspect the output before trusting it.", call. = FALSE)
+  else if (min(fit$width_x, fit$width_y) > .gb_align_loose_px)
+    warning("For slide '", slide, "' the offset is only loosely constrained ",
+            "(the tissue occupies a small part of each FOV). Alignment may be ",
+            "off by up to half the reported width.", call. = FALSE)
+  invisible(fit)
+}
+
 # Extract one polygon input (Seurat object or data.frame) into a long table with
-# columns cell, x, y (one row per polygon vertex), slide, State.
+# columns cell, x, y (one row per polygon vertex), slide, State, fov.
 #   force_slide    : if not NA, assign every row to this slide (positional
 #                    per-slide input) and ignore any slide column.
 #   fallback_slide : slide to use only when there is no slide column (single
 #                    combined input covering one slide).
 # Otherwise the slide is read per-cell/row from `slide_col`.
 .gb_extract_polys_one <- function(obj, state_col, slide_col, cell_col,
-                                  x_col, y_col, force_slide, fallback_slide) {
+                                  x_col, y_col, force_slide, fallback_slide,
+                                  fov_col = "fov") {
   assign_slide <- function(col_vals, n) {
     if (!is.na(force_slide)) return(rep(force_slide, n))
     if (!is.null(col_vals))  return(as.character(col_vals))
@@ -472,10 +594,15 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
            " (need x, y, cell).", call. = FALSE)
     out <- data.frame(cell = as.character(cd[[cc]]), x = cd[[cx]], y = cd[[cy]],
                       stringsAsFactors = FALSE)
-    col_vals <- if (slide_col %in% names(md))
-      md[[slide_col]][match(out$cell, md$.cell)] else NULL
+    j <- match(out$cell, md$.cell)
+    col_vals <- if (slide_col %in% names(md)) md[[slide_col]][j] else NULL
     out$slide <- assign_slide(col_vals, nrow(out))
-    out$State <- md[[state_col]][match(out$cell, md$.cell)]
+    out$State <- md[[state_col]][j]
+    # FOV id (used by poly_align = "auto"): meta.data first, then any fov column
+    # carried on the coordinates themselves.
+    out$fov <- if (!is.null(fov_col) && fov_col %in% names(md)) md[[fov_col]][j]
+               else if (!is.null(fov_col) && fov_col %in% names(cd)) cd[[fov_col]]
+               else NA
     return(out[!is.na(out$State), , drop = FALSE])
   }
   if (is.data.frame(obj)) {
@@ -489,17 +616,33 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
     return(data.frame(cell = as.character(obj[[cell_col]]),
                       x = obj[[x_col]], y = obj[[y_col]],
                       slide = assign_slide(col_vals, nrow(obj)),
-                      State = obj[[state_col]], stringsAsFactors = FALSE))
+                      State = obj[[state_col]],
+                      fov = if (!is.null(fov_col) && fov_col %in% names(obj))
+                              obj[[fov_col]] else NA,
+                      stringsAsFactors = FALSE))
   }
   stop("Each 'polygons' input must be a Seurat object or a data.frame (or an ",
        "RDS path to one).", call. = FALSE)
 }
 
-# Load + validate all polygon inputs. Returns list(verts = named-by-slide list
-# of data.frame(poly_id, x, y in vertex order), state_map = data.frame(poly_id,
-# State)). Called during preflight so problems surface before any stitching.
+# Load + validate all polygon inputs and convert every vertex into RASTER PIXEL
+# coordinates, fitting the transform separately for each slide when
+# align = "auto". Returns list(verts = named-by-slide list of
+# data.frame(poly_id, x, y in vertex order), state_map = data.frame(poly_id,
+# State), align = named-by-slide list of fits or NULL). Called during preflight
+# so problems surface before any stitching.
 .gb_load_polygons <- function(polygons, slide_names, state_col, slide_col,
-                              cell_col, x_col, y_col) {
+                              cell_col, x_col, y_col,
+                              fov_col       = "fov",
+                              fov_positions = NULL,
+                              pixel_size_um = NULL,
+                              fov_size_px   = NULL,
+                              align         = "auto",
+                              units         = "mm",
+                              flip_y        = TRUE,
+                              x_off         = 0,
+                              y_off         = 0,
+                              trim          = 0.002) {
   if (is.null(state_col) || !nzchar(state_col))
     stop("Polygon generation needs 'state_col': the column to use as the ",
          "Minerva State (e.g. a cluster or cell-type column). Set it, or set ",
@@ -535,7 +678,7 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
     }
     long[[i]] <- .gb_extract_polys_one(inputs[[i]], state_col, slide_col,
                                        cell_col, x_col, y_col,
-                                       force_slide, fallback_slide)
+                                       force_slide, fallback_slide, fov_col)
   }
   df <- do.call(rbind, long)
   df <- df[!is.na(df$slide), , drop = FALSE]
@@ -558,10 +701,43 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   key <- paste(df$slide, df$cell, sep = "\r")
   df$poly_id <- match(key, unique(key))
   state_map <- df[!duplicated(df$poly_id), c("poly_id", "State")]
-  verts <- lapply(slide_names, function(s)
-    df[df$slide == s, c("poly_id", "x", "y")])
-  names(verts) <- slide_names
-  list(verts = verts, state_map = state_map)
+
+  # ---- per-slide transform into raster pixels --------------------------------
+  manual_factor <- if (identical(units, "mm")) 1000 / pixel_size_um else 1
+  fits  <- vector("list", n_slides); names(fits)  <- slide_names
+  verts <- vector("list", n_slides); names(verts) <- slide_names
+
+  do_fit <- identical(align, "auto") && !is.null(fov_positions) &&
+            !is.null(pixel_size_um) && !is.null(fov_size_px)
+  if (do_fit) message("Fitting the polygon coordinate frame to the FOV grid ...")
+
+  for (s in seq_len(n_slides)) {
+    nm  <- slide_names[s]
+    d   <- df[df$slide == nm, c("poly_id", "x", "y", "fov"), drop = FALSE]
+    fit <- NULL
+    if (do_fit && nrow(d)) {
+      tl <- tryCatch(.gb_read_fov_positions(fov_positions[[s]], pixel_size_um),
+                     error = function(e) NULL)
+      if (!is.null(tl))
+        fit <- .gb_fit_poly_align(d, tl, fov_size_px, pixel_size_um,
+                                  units = "auto", trim = trim)
+      .gb_report_poly_align(fit, nm, pixel_size_um, units)
+    }
+    if (!is.null(fit)) {
+      d$x <- d$x * fit$ax + fit$bx
+      d$y <- d$y * fit$ay + fit$by
+    } else {
+      # Manual fallback: the fixed transform used before poly_align existed.
+      d$x <- d$x * manual_factor + x_off
+      yy  <- d$y * manual_factor
+      d$y <- (if (isTRUE(flip_y)) -yy else yy) + y_off
+    }
+    d$x <- round(d$x); d$y <- round(d$y)
+    fits[[nm]]  <- fit
+    verts[[nm]] <- d[, c("poly_id", "x", "y"), drop = FALSE]
+  }
+
+  list(verts = verts, state_map = state_map, align = fits)
 }
 
 # Build a SpatVector of polygons from a data.frame(poly_id, x, y). Vertices are
@@ -579,6 +755,9 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 
 # Transform vertex coordinates (per slide), shift, rasterize filled cells +
 # borders onto `template`, and write <stem>_polygons.tif and _polygons.csv.
+# NOTE: when .gb_load_polygons() has already aligned the vertices (the default),
+# it is called with units = "px", flip_y = FALSE and zero offsets, so the
+# transform below is the identity and only the grid shift is applied.
 .gb_write_polygons <- function(verts, state_map, template, slide_set, shifts,
                                out_dir, stem, pixel_size_um, fov_size_px,
                                units, flip_y, x_off, y_off, border_value,
@@ -628,6 +807,71 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 }
 
 
+#' Report the polygon-to-raster transform for one slide
+#'
+#' @description
+#' Diagnostic companion to \code{\link{stitch_fovs_to_ometiff}}: fits and prints
+#' the affine that maps a polygon input's coordinates onto the stitched raster
+#' grid, without running a stitch. Useful for checking a new polygon source, or
+#' for reading off the equivalent manual arguments.
+#'
+#' @param fov_positions Path to that slide's \code{*_fov_positions_file.csv(.gz)}
+#'   (or a data.frame).
+#' @param polygons A \pkg{Seurat} object, a polygon vertex data.frame, or an
+#'   \code{.rds} path to either. Must cover only the one slide.
+#' @param state_col Any existing \code{meta.data} / table column; needed only to
+#'   satisfy the extractor, it plays no part in the fit.
+#' @param fov_size_px,pixel_size_um As in \code{\link{stitch_fovs_to_ometiff}}.
+#' @param fov_col,cell_col,x_col,y_col Column names in the polygon input.
+#' @param units \code{"auto"} (default) to infer the coordinate units, or one of
+#'   \code{"mm"}, \code{"um"}, \code{"px"} to fix them.
+#' @param trim Trimming quantile for the feasibility bounds.
+#'
+#' @return (Invisibly) the fit: a list with \code{units}, \code{ax}, \code{bx},
+#'   \code{ay}, \code{by}, the interval widths and the fraction of vertices
+#'   landing inside their own FOV.
+#'
+#' @examples
+#' \dontrun{
+#' gb_check_poly_alignment(
+#'   "~/CosMX_data/run/flatFiles/MNCharu/MNCharu_fov_positions_file.csv.gz",
+#'   "~/CosMX_data/run/seuratObject_MN.Charu.RDS", state_col = "fov")
+#' }
+#' @export
+gb_check_poly_alignment <- function(fov_positions, polygons,
+                                    state_col     = "fov",
+                                    fov_size_px   = 4256L,
+                                    pixel_size_um = 0.120280945,
+                                    fov_col       = "fov",
+                                    cell_col      = "cell_ID",
+                                    x_col         = "x_slide_mm",
+                                    y_col         = "y_slide_mm",
+                                    units         = "auto",
+                                    trim          = 0.002) {
+  if (is.character(polygons)) polygons <- readRDS(polygons)
+  d <- .gb_extract_polys_one(polygons, state_col, slide_col = "\r\r",
+                             cell_col = cell_col, x_col = x_col, y_col = y_col,
+                             force_slide = "slide", fallback_slide = NA_character_,
+                             fov_col = fov_col)
+  tiles <- .gb_read_fov_positions(fov_positions, pixel_size_um)
+  fit <- .gb_fit_poly_align(d, tiles, fov_size_px, pixel_size_um,
+                            units = units, trim = trim)
+  if (is.null(fit))
+    stop("No vertex matched a FOV in the positions file; check 'fov_col'.",
+         call. = FALSE)
+  .gb_report_poly_align(fit, "slide", pixel_size_um, units)
+  message("\nEquivalent single-slide arguments for poly_align = \"manual\":")
+  if (fit$ax < 0)
+    message("  x is mirrored -- not expressible manually; keep poly_align = \"auto\".")
+  else
+    message(sprintf("  poly_coord_units = \"%s\"\n  poly_x_offset_px = %.1f",
+                    fit$units, fit$bx))
+  message(sprintf("  poly_flip_y      = %s\n  poly_y_offset_px = %.1f",
+                  fit$ay < 0, fit$by))
+  invisible(fit)
+}
+
+
 #' Stitch CosMx per-FOV morphology images into a Minerva-ready OME-TIFF
 #'
 #' @description
@@ -653,6 +897,15 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #' \strong{resampled onto the exact IF output grid}. The H&E OME-TIFF therefore
 #' has identical \code{SizeX/SizeY} and \code{PhysicalSize} to the IF output
 #' (guaranteeing overlay in Minerva) but correct 8-bit RGB channel metadata.
+#'
+#' Polygon coordinates are placed on the raster grid by an affine that
+#' \code{poly_align = "auto"} fits \strong{per slide} from the FOV positions
+#' file, using each cell's own FOV assignment. Different polygon sources sit in
+#' differently translated frames -- notably, the frame produced by
+#' \code{TransferPolygonsToSeurat()} and the raw AtoMx/CosMx
+#' \code{x_slide_mm}/\code{y_slide_mm} frame differ by a per-slide shift -- so a
+#' single set of scalar offsets cannot serve a multi-slide run. Fitting per slide
+#' makes both sources work with no manual tuning.
 #'
 #' Metadata is generated programmatically; no external OME-XML file is needed.
 #' Backends: \code{"bftools"} (default; needs \code{bfconvert}/\code{tiffcomment},
@@ -706,7 +959,8 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   these (one combined input, or one per slide). For a Seurat object, vertices
 #'   come from \code{GetTissueCoordinates(obj, which = "segmentation")} and the
 #'   slide/State from \code{meta.data}; for a table, from the columns named
-#'   below.
+#'   below. Both fastReseg-derived objects (via \code{TransferPolygonsToSeurat})
+#'   and the original AtoMx/CosMx Seurat objects are accepted.
 #' @param state_col Column holding the Minerva State (e.g. a cluster/cell-type
 #'   column) in the Seurat \code{meta.data} or the polygon table. Required when
 #'   generating polygons.
@@ -720,13 +974,29 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   y column names. Defaults \code{"cell_ID"}, \code{"x_slide_mm"},
 #'   \code{"y_slide_mm"}.
 #' @param poly_coord_units Units of the polygon x/y: \code{"mm"} (default,
-#'   converted with \code{1000 / pixel_size_um}) or \code{"px"}.
+#'   converted with \code{1000 / pixel_size_um}) or \code{"px"}. Only consulted
+#'   when \code{poly_align = "manual"} (or as a fallback for a slide whose frame
+#'   could not be fitted); \code{poly_align = "auto"} infers the units itself and
+#'   says so when they differ from this setting.
+#' @param poly_align \code{"auto"} (default) fits the polygon-to-raster transform
+#'   separately for each slide from the FOV positions file, using each cell's own
+#'   FOV assignment (\code{poly_fov_col}). This is what lets both
+#'   \code{TransferPolygonsToSeurat} output and raw AtoMx/CosMx Seurat objects
+#'   align, since their frames are translated by a different amount on every
+#'   slide. \code{"manual"} instead applies \code{poly_coord_units} /
+#'   \code{poly_flip_y} / \code{poly_x_offset_px} / \code{poly_y_offset_px} to
+#'   every slide, as in earlier versions. Those manual settings are also the
+#'   per-slide fallback when a slide has no usable FOV ids. Use
+#'   \code{\link{gb_check_poly_alignment}} to inspect a fit on its own.
+#' @param poly_fov_col Column holding the FOV number, used by
+#'   \code{poly_align = "auto"}. Looked up in the Seurat \code{meta.data} first,
+#'   then on the coordinate table. Default \code{"fov"}.
 #' @param poly_flip_y Logical; negate y to match the raster's flipped frame.
-#'   Default \code{TRUE}.
+#'   Default \code{TRUE}. Manual mode only.
 #' @param poly_x_offset_px,poly_y_offset_px Constant offsets (in original px)
 #'   added after unit conversion/flip to align polygons to the raster origin.
 #'   Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
-#'   resolves to \code{-fov_size_px}).
+#'   resolves to \code{-fov_size_px}). Manual mode only.
 #' @param poly_border_value,poly_border_label Integer burned into the \code{.tif}
 #'   for cell borders and its CSV label. Defaults \code{9999999} and
 #'   \code{"Cell Border"}.
@@ -764,6 +1034,8 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'
 #' @return (Invisibly) a character vector of the OME-TIFF paths written.
 #'
+#' @seealso \code{\link{gb_check_poly_alignment}}
+#'
 #' @examples
 #' \dontrun{
 #' # One slide, IF only:
@@ -782,6 +1054,19 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   he_images     = c("~/reg/usc1/he_via_fullIF_smooth.tif",
 #'                     "~/reg/usc2/he_via_fullIF_smooth.tif",
 #'                     "~/reg/usc5/he_via_fullIF_smooth.tif"))
+#'
+#' # Two slides with polygons taken straight from the AtoMx Seurat objects.
+#' # poly_align = "auto" (the default) fits each slide's frame separately.
+#' stitch_fovs_to_ometiff(
+#'   fov_positions = c("run/flatFiles/MNCharu/MNCharu_fov_positions_file.csv.gz",
+#'                     "run/flatFiles/TA648/TA648_fov_positions_file.csv.gz"),
+#'   image_dir     = c("~/Desktop/Morphology2D", "~/Desktop/Morphology2D_TA648"),
+#'   out_dir       = "~/test_ometiff/downsample16_2slides",
+#'   downsample_factor = 16, slide_names = c("MNCharu", "TA648"),
+#'   stitch_slides = TRUE, slide_layout = 2,
+#'   backend = "bftools", bftools_dir = "/Applications/bftools",
+#'   polygons  = c("run/seuratObject_MN.Charu.RDS", "run/seuratObject_TA.648.RDS"),
+#'   state_col = "cell_type_high_res")
 #' }
 #'
 #' @importFrom utils read.csv
@@ -811,6 +1096,8 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    poly_x_col         = "x_slide_mm",
                                    poly_y_col         = "y_slide_mm",
                                    poly_coord_units   = c("mm", "px"),
+                                   poly_align         = c("auto", "manual"),
+                                   poly_fov_col       = "fov",
                                    poly_flip_y        = TRUE,
                                    poly_x_offset_px   = 0,
                                    poly_y_offset_px   = NULL,
@@ -828,6 +1115,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   metadata_injector <- match.arg(metadata_injector)
   he_flip <- match.arg(he_flip)
   poly_coord_units <- match.arg(poly_coord_units)
+  poly_align <- match.arg(poly_align)
   if (!requireNamespace("terra", quietly = TRUE))
     stop("Package 'terra' is required. install.packages('terra').")
   downsample_factor  <- as.integer(downsample_factor)
@@ -944,7 +1232,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     invisible(TRUE)
   }
 
-  # ---- polygon preflight (validate/load before any stitching) ---------------
+  # ---- polygon preflight (validate/load/align before any stitching) ---------
   do_polygons <- FALSE
   poly_data <- NULL
   poly_y_off <- if (is.null(poly_y_offset_px)) -fov_size_px else poly_y_offset_px
@@ -957,7 +1245,22 @@ stitch_fovs_to_ometiff <- function(fov_positions,
       message("Validating polygon inputs ...")
       poly_data <- .gb_load_polygons(polygons, slide_names, state_col,
                                      poly_slide_col, poly_cell_col,
-                                     poly_x_col, poly_y_col)
+                                     poly_x_col, poly_y_col,
+                                     fov_col       = poly_fov_col,
+                                     fov_positions = fov_positions,
+                                     pixel_size_um = pixel_size_um,
+                                     fov_size_px   = fov_size_px,
+                                     align         = poly_align,
+                                     units         = poly_coord_units,
+                                     flip_y        = poly_flip_y,
+                                     x_off         = poly_x_offset_px,
+                                     y_off         = poly_y_off)
+      # .gb_load_polygons() has already put every vertex in raster pixels, so
+      # neutralise the transform inside .gb_write_polygons(): with units "px",
+      # no flip and zero offsets it is the identity, leaving only the per-slide
+      # grid shift to be applied.
+      poly_coord_units <- "px"; poly_flip_y <- FALSE
+      poly_x_offset_px <- 0;    poly_y_off  <- 0
       do_polygons <- TRUE
     }
   }
@@ -1260,7 +1563,11 @@ if (sys.nframe() == 0) {
     optparse::make_option(c("--poly_y_col"), type = "character", default = "y_slide_mm",
       help = "y column in the polygon table [default= %default]"),
     optparse::make_option(c("--poly_coord_units"), type = "character", default = "mm",
-      help = "'mm' or 'px' for polygon coordinates [default= %default]"),
+      help = "'mm' or 'px' for polygon coordinates (manual alignment only) [default= %default]"),
+    optparse::make_option(c("--poly_align"), type = "character", default = "auto",
+      help = "'auto' (fit the polygon frame per slide) or 'manual' [default= %default]"),
+    optparse::make_option(c("--poly_fov_col"), type = "character", default = "fov",
+      help = "FOV-id column, used by poly_align = 'auto' [default= %default]"),
     optparse::make_option(c("-k", "--keep_intermediate"), action = "store_true", default = FALSE,
       help = "Keep intermediate .tif/.xml (and per-slide polygons) [default= %default]"),
     optparse::make_option(c("--no_overwrite"), action = "store_true", default = FALSE,
@@ -1302,6 +1609,8 @@ if (sys.nframe() == 0) {
     poly_x_col         = opt$poly_x_col,
     poly_y_col         = opt$poly_y_col,
     poly_coord_units   = opt$poly_coord_units,
+    poly_align         = opt$poly_align,
+    poly_fov_col       = opt$poly_fov_col,
     backend            = opt$backend,
     metadata_injector  = opt$metadata_injector,
     bftools_dir        = opt$bftools_dir,
