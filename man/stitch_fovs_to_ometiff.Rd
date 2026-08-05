@@ -29,6 +29,8 @@ stitch_fovs_to_ometiff(
   poly_x_col = "x_slide_mm",
   poly_y_col = "y_slide_mm",
   poly_coord_units = c("mm", "px"),
+  poly_align = c("auto", "manual"),
+  poly_fov_col = "fov",
   poly_flip_y = TRUE,
   poly_x_offset_px = 0,
   poly_y_offset_px = NULL,
@@ -109,7 +111,8 @@ one row per polygon vertex, an \code{.rds} path to either, or a list of
 these (one combined input, or one per slide). For a Seurat object, vertices
 come from \code{GetTissueCoordinates(obj, which = "segmentation")} and the
 slide/State from \code{meta.data}; for a table, from the columns named
-below.}
+below. Both fastReseg-derived objects (via \code{TransferPolygonsToSeurat})
+and the original AtoMx/CosMx Seurat objects are accepted.}
 
 \item{state_col}{Column holding the Minerva State (e.g. a cluster/cell-type
 column) in the Seurat \code{meta.data} or the polygon table. Required when
@@ -127,15 +130,33 @@ y column names. Defaults \code{"cell_ID"}, \code{"x_slide_mm"},
 \code{"y_slide_mm"}.}
 
 \item{poly_coord_units}{Units of the polygon x/y: \code{"mm"} (default,
-converted with \code{1000 / pixel_size_um}) or \code{"px"}.}
+converted with \code{1000 / pixel_size_um}) or \code{"px"}. Only consulted
+when \code{poly_align = "manual"} (or as a fallback for a slide whose frame
+could not be fitted); \code{poly_align = "auto"} infers the units itself and
+says so when they differ from this setting.}
+
+\item{poly_align}{\code{"auto"} (default) fits the polygon-to-raster transform
+separately for each slide from the FOV positions file, using each cell's own
+FOV assignment (\code{poly_fov_col}). This is what lets both
+\code{TransferPolygonsToSeurat} output and raw AtoMx/CosMx Seurat objects
+align, since their frames are translated by a different amount on every
+slide. \code{"manual"} instead applies \code{poly_coord_units} /
+\code{poly_flip_y} / \code{poly_x_offset_px} / \code{poly_y_offset_px} to
+every slide, as in earlier versions. Those manual settings are also the
+per-slide fallback when a slide has no usable FOV ids. Use
+\code{\link{gb_check_poly_alignment}} to inspect a fit on its own.}
+
+\item{poly_fov_col}{Column holding the FOV number, used by
+\code{poly_align = "auto"}. Looked up in the Seurat \code{meta.data} first,
+then on the coordinate table. Default \code{"fov"}.}
 
 \item{poly_flip_y}{Logical; negate y to match the raster's flipped frame.
-Default \code{TRUE}.}
+Default \code{TRUE}. Manual mode only.}
 
 \item{poly_x_offset_px, poly_y_offset_px}{Constant offsets (in original px)
 added after unit conversion/flip to align polygons to the raster origin.
 Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
-resolves to \code{-fov_size_px}).}
+resolves to \code{-fov_size_px}). Manual mode only.}
 
 \item{poly_border_value, poly_border_label}{Integer burned into the \code{.tif}
 for cell borders and its CSV label. Defaults \code{9999999} and
@@ -206,6 +227,15 @@ coordinate frame, carried through the same grid placement, then
 has identical \code{SizeX/SizeY} and \code{PhysicalSize} to the IF output
 (guaranteeing overlay in Minerva) but correct 8-bit RGB channel metadata.
 
+Polygon coordinates are placed on the raster grid by an affine that
+\code{poly_align = "auto"} fits \strong{per slide} from the FOV positions
+file, using each cell's own FOV assignment. Different polygon sources sit in
+differently translated frames -- notably, the frame produced by
+\code{TransferPolygonsToSeurat()} and the raw AtoMx/CosMx
+\code{x_slide_mm}/\code{y_slide_mm} frame differ by a per-slide shift -- so a
+single set of scalar offsets cannot serve a multi-slide run. Fitting per slide
+makes both sources work with no manual tuning.
+
 Metadata is generated programmatically; no external OME-XML file is needed.
 Backends: \code{"bftools"} (default; needs \code{bfconvert}/\code{tiffcomment},
 supports BigTIFF) or \code{"rbioformats"} (experimental, no CLI tools).
@@ -228,6 +258,22 @@ stitch_fovs_to_ometiff(
   he_images     = c("~/reg/usc1/he_via_fullIF_smooth.tif",
                     "~/reg/usc2/he_via_fullIF_smooth.tif",
                     "~/reg/usc5/he_via_fullIF_smooth.tif"))
+
+# Two slides with polygons taken straight from the AtoMx Seurat objects.
+# poly_align = "auto" (the default) fits each slide's frame separately.
+stitch_fovs_to_ometiff(
+  fov_positions = c("run/flatFiles/MNCharu/MNCharu_fov_positions_file.csv.gz",
+                    "run/flatFiles/TA648/TA648_fov_positions_file.csv.gz"),
+  image_dir     = c("~/Desktop/Morphology2D", "~/Desktop/Morphology2D_TA648"),
+  out_dir       = "~/test_ometiff/downsample16_2slides",
+  downsample_factor = 16, slide_names = c("MNCharu", "TA648"),
+  stitch_slides = TRUE, slide_layout = 2,
+  backend = "bftools", bftools_dir = "/Applications/bftools",
+  polygons  = c("run/seuratObject_MN.Charu.RDS", "run/seuratObject_TA.648.RDS"),
+  state_col = "cell_type_high_res")
 }
 
+}
+\seealso{
+\code{\link{gb_check_poly_alignment}}
 }
