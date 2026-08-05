@@ -520,6 +520,22 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
     stop("Provide either 1 combined 'polygons' input or exactly ", n_slides,
          " (one per slide); got ", n_in, ".", call. = FALSE)
 
+  if (n_in == n_slides && n_slides > 1L) {
+    message("Polygons: ", n_in, " inputs for ", n_slides, " slides -> assigning ",
+            "each input to a slide by position (", paste(slide_names, collapse = ", "),
+            "); 'poly_slide_col' is not used in this mode.")
+    # Heads-up if the user set a slide column that isn't present anywhere (they
+    # may think it is being used to split slides).
+    present <- vapply(inputs, function(o) {
+      nm <- if (inherits(o, "Seurat")) names(o@meta.data) else if (is.data.frame(o)) names(o) else character(0)
+      slide_col %in% nm
+    }, logical(1))
+    if (!any(present) && !identical(slide_col, "Run_Tissue_name"))
+      warning("poly_slide_col = '", slide_col, "' was not found in any polygon ",
+              "input and is ignored here (slides are assigned by input order).",
+              call. = FALSE)
+  }
+
   long <- vector("list", n_in)
   for (i in seq_len(n_in)) {
     if (n_in == 1L) {
@@ -553,6 +569,8 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   df <- df[df$slide %in% slide_names, , drop = FALSE]
   if (!nrow(df)) stop("No polygon vertices remain after filtering to the ",
                       "requested slides.", call. = FALSE)
+  message("Polygons: ", nrow(df), " vertices; State column '", state_col,
+          "' has ", length(unique(df$State)), " distinct value(s).")
 
   # Global unique poly_id per (slide, cell), preserving vertex order.
   key <- paste(df$slide, df$cell, sep = "\r")
@@ -577,23 +595,46 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   v
 }
 
-# Transform vertex coordinates (per slide), shift, rasterize filled cells +
-# borders onto `template`, and write <stem>_polygons.tif and _polygons.csv.
+# Transform vertex coordinates (per slide), align to the slide's raster frame,
+# shift onto the grid, then rasterize filled cells + borders onto `template` and
+# write <stem>_polygons.tif and _polygons.csv.
+#   slide_ext : named list slide -> c(xmin, xmax, ymin, ymax) of that slide's
+#               (pre-grid-shift) IF raster, used to align polygons to the image.
+#   align     : "center" (translate bbox-centre to raster-centre, keep scale),
+#               "bbox" (scale+translate bbox onto the raster extent), or
+#               "none"  (use the manual x_off/y_off only).
 .gb_write_polygons <- function(verts, state_map, template, slide_set, shifts,
-                               out_dir, stem, pixel_size_um, fov_size_px,
-                               units, flip_y, x_off, y_off, border_value,
-                               border_label) {
+                               slide_ext, out_dir, stem, pixel_size_um, fov_size_px,
+                               units, flip_y, align, x_off, y_off,
+                               border_value, border_label) {
   factor <- if (units == "mm") 1000 / pixel_size_um else 1
   vects <- list()
   for (s in slide_set) {
     d <- verts[[s]]
     if (is.null(d) || !nrow(d)) next
-    x <- round(d$x * factor) + x_off
-    yy <- round(d$y * factor)
-    y <- (if (isTRUE(flip_y)) -yy else yy) + y_off
+    x <- d$x * factor
+    y <- (if (isTRUE(flip_y)) -1 else 1) * (d$y * factor)
+    e <- slide_ext[[s]]                                   # xmin,xmax,ymin,ymax
+    if (align == "none") {
+      x <- x + x_off; y <- y + y_off
+    } else if (length(x)) {
+      pxmin <- min(x); pxmax <- max(x); pymin <- min(y); pymax <- max(y)
+      pcx <- (pxmin + pxmax) / 2; pcy <- (pymin + pymax) / 2
+      rcx <- (e[1] + e[2]) / 2;   rcy <- (e[3] + e[4]) / 2
+      if (align == "bbox") {
+        sx <- if (pxmax > pxmin) (e[2] - e[1]) / (pxmax - pxmin) else 1
+        sy <- if (pymax > pymin) (e[4] - e[3]) / (pymax - pymin) else 1
+        x <- (x - pcx) * sx + rcx; y <- (y - pcy) * sy + rcy
+      } else {                                            # center (keep scale)
+        x <- x - pcx + rcx; y <- y - pcy + rcy
+      }
+    }
+    message(sprintf(
+      "  [%s] polygons span x[%.0f, %.0f] y[%.0f, %.0f]; image x[%.0f, %.0f] y[%.0f, %.0f]",
+      s, min(x), max(x), min(y), max(y), e[1], e[2], e[3], e[4]))
     sh <- shifts[[s]]; if (is.null(sh)) sh <- c(0, 0)
     v <- .gb_build_poly_vect(data.frame(poly_id = d$poly_id,
-                                        x = x + sh[1], y = y + sh[2]))
+                                        x = round(x + sh[1]), y = round(y + sh[2])))
     if (!is.null(v)) vects[[length(vects) + 1L]] <- v
   }
   if (!length(vects)) { warning("No polygons to rasterize for '", stem, "'."); return(NULL) }
@@ -723,8 +764,18 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   converted with \code{1000 / pixel_size_um}) or \code{"px"}.
 #' @param poly_flip_y Logical; negate y to match the raster's flipped frame.
 #'   Default \code{TRUE}.
+#' @param poly_align How to place each slide's polygons onto its image:
+#'   \code{"center"} (default) keeps the unit scale but translates so the
+#'   polygon bounding-box centre matches the image centre; \code{"bbox"} scales
+#'   and translates the polygon bounding box to fill the image extent (use only
+#'   if the unit scale is unknown, as it can distort); \code{"none"} applies only
+#'   the manual \code{poly_x_offset_px}/\code{poly_y_offset_px}. \code{"center"}
+#'   is robust across coordinate sources (e.g. Seurat segmentation coordinates,
+#'   whose origin often differs from the FOV positions), which is why it is the
+#'   default; a per-slide diagnostic line prints the polygon and image spans so
+#'   you can confirm the overlay.
 #' @param poly_x_offset_px,poly_y_offset_px Constant offsets (in original px)
-#'   added after unit conversion/flip to align polygons to the raster origin.
+#'   added after unit conversion/flip, used only when \code{poly_align = "none"}.
 #'   Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
 #'   resolves to \code{-fov_size_px}).
 #' @param poly_border_value,poly_border_label Integer burned into the \code{.tif}
@@ -812,6 +863,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    poly_y_col         = "y_slide_mm",
                                    poly_coord_units   = c("mm", "px"),
                                    poly_flip_y        = TRUE,
+                                   poly_align         = c("center", "bbox", "none"),
                                    poly_x_offset_px   = 0,
                                    poly_y_offset_px   = NULL,
                                    poly_border_value  = 9999999L,
@@ -828,6 +880,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   metadata_injector <- match.arg(metadata_injector)
   he_flip <- match.arg(he_flip)
   poly_coord_units <- match.arg(poly_coord_units)
+  poly_align <- match.arg(poly_align)
   if (!requireNamespace("terra", quietly = TRUE))
     stop("Package 'terra' is required. install.packages('terra').")
   downsample_factor  <- as.integer(downsample_factor)
@@ -1148,23 +1201,29 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     }
 
     # Polygons: combined (always) + per-slide (if keep_intermediate). Combined
-    # polygons are shifted by the SAME grid offsets as the rasters.
+    # polygons are aligned to each slide's raster frame, then shifted by the
+    # SAME grid offsets as the rasters.
     if (do_polygons) {
       shifts <- stats::setNames(
         lapply(seq_len(n_slides), function(k) c(off$dx[k], off$dy[k])), slide_names)
+      slide_ext <- stats::setNames(
+        lapply(seq_len(n_slides), function(k) as.vector(terra::ext(if_list[[k]]))),
+        slide_names)
       written <- c(written, .gb_write_polygons(
         poly_data$verts, poly_data$state_map, merged_if, slide_names, shifts,
-        out_dir, combine_name, pixel_size_um, fov_size_px, poly_coord_units,
-        poly_flip_y, poly_x_offset_px, poly_y_off, poly_border_value,
-        poly_border_label))
+        slide_ext, out_dir, combine_name, pixel_size_um, fov_size_px,
+        poly_coord_units, poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
+        poly_border_value, poly_border_label))
       if (isTRUE(keep_intermediate)) {
         for (s in slide_names) {
           k <- match(s, slide_names)
           written <- c(written, .gb_write_polygons(
             poly_data$verts, poly_data$state_map, if_list[[k]], s,
-            stats::setNames(list(c(0, 0)), s), out_dir, s, pixel_size_um,
-            fov_size_px, poly_coord_units, poly_flip_y, poly_x_offset_px,
-            poly_y_off, poly_border_value, poly_border_label))
+            stats::setNames(list(c(0, 0)), s),
+            stats::setNames(list(as.vector(terra::ext(if_list[[k]]))), s),
+            out_dir, s, pixel_size_um, fov_size_px, poly_coord_units,
+            poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
+            poly_border_value, poly_border_label))
         }
       }
     }
@@ -1184,9 +1243,11 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     if (do_polygons)
       written <- c(written, .gb_write_polygons(
         poly_data$verts, poly_data$state_map, if_list[[s]], stem,
-        stats::setNames(list(c(0, 0)), stem), out_dir, stem, pixel_size_um,
-        fov_size_px, poly_coord_units, poly_flip_y, poly_x_offset_px,
-        poly_y_off, poly_border_value, poly_border_label))
+        stats::setNames(list(c(0, 0)), stem),
+        stats::setNames(list(as.vector(terra::ext(if_list[[s]]))), stem),
+        out_dir, stem, pixel_size_um, fov_size_px, poly_coord_units,
+        poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
+        poly_border_value, poly_border_label))
     unlink(attr(if_list[[s]], "gb_tmp"))
   }
   invisible(written)
@@ -1261,6 +1322,8 @@ if (sys.nframe() == 0) {
       help = "y column in the polygon table [default= %default]"),
     optparse::make_option(c("--poly_coord_units"), type = "character", default = "mm",
       help = "'mm' or 'px' for polygon coordinates [default= %default]"),
+    optparse::make_option(c("--poly_align"), type = "character", default = "center",
+      help = "Polygon-to-image alignment: 'center', 'bbox', or 'none' [default= %default]"),
     optparse::make_option(c("-k", "--keep_intermediate"), action = "store_true", default = FALSE,
       help = "Keep intermediate .tif/.xml (and per-slide polygons) [default= %default]"),
     optparse::make_option(c("--no_overwrite"), action = "store_true", default = FALSE,
@@ -1302,6 +1365,7 @@ if (sys.nframe() == 0) {
     poly_x_col         = opt$poly_x_col,
     poly_y_col         = opt$poly_y_col,
     poly_coord_units   = opt$poly_coord_units,
+    poly_align         = opt$poly_align,
     backend            = opt$backend,
     metadata_injector  = opt$metadata_injector,
     bftools_dir        = opt$bftools_dir,
