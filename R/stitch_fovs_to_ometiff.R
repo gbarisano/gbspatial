@@ -87,7 +87,7 @@
 
 # Minimal valid OME-XML for a multi-channel (one plane per channel) uint16 image.
 .gb_build_ome_xml <- function(size_x, size_y, channels, pixel_size_um,
-                              image_name = "stitched") {
+                              image_name = "stitched", big_endian = FALSE) {
   n <- nrow(channels); col_int <- .gb_col_to_ome(channels$color)
   chan_xml <- vapply(seq_len(n), function(k) {
     ex <- channels$excitation[k]; em <- channels$emission[k]
@@ -108,7 +108,7 @@
 'http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd">\n',
 '  <Image ID="Image:0" Name="', .gb_xml_escape(image_name), '">\n',
 '    <Pixels ID="Pixels:0" DimensionOrder="XYCZT" Type="uint16" SignificantBits="16" ',
-'BigEndian="false" Interleaved="false" ',
+'BigEndian="', if (isTRUE(big_endian)) "true" else "false", '" Interleaved="false" ',
 'SizeX="', size_x, '" SizeY="', size_y, '" SizeC="', n, '" SizeZ="1" SizeT="1" ',
 'PhysicalSizeX="', pixel_size_um, '" PhysicalSizeXUnit="\u00b5m" ',
 'PhysicalSizeY="', pixel_size_um, '" PhysicalSizeYUnit="\u00b5m">\n',
@@ -118,7 +118,7 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 
 # Minimal valid OME-XML for an interleaved 8-bit RGB image (H&E).
 .gb_build_ome_xml_rgb <- function(size_x, size_y, pixel_size_um,
-                                  image_name = "he") {
+                                  image_name = "he", big_endian = FALSE) {
   paste0(
 '<?xml version="1.0" encoding="UTF-8"?>\n',
 '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" ',
@@ -127,7 +127,7 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 'http://www.openmicroscopy.org/Schemas/OME/2016-06/ome.xsd">\n',
 '  <Image ID="Image:0" Name="', .gb_xml_escape(image_name), '">\n',
 '    <Pixels ID="Pixels:0" DimensionOrder="XYCZT" Type="uint8" SignificantBits="8" ',
-'BigEndian="false" Interleaved="true" ',
+'BigEndian="', if (isTRUE(big_endian)) "true" else "false", '" Interleaved="true" ',
 'SizeX="', size_x, '" SizeY="', size_y, '" SizeC="3" SizeZ="1" SizeT="1" ',
 'PhysicalSizeX="', pixel_size_um, '" PhysicalSizeXUnit="\u00b5m" ',
 'PhysicalSizeY="', pixel_size_um, '" PhysicalSizeYUnit="\u00b5m">\n',
@@ -143,6 +143,12 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
     if (file.exists(cand)) return(cand)
   }
   p <- Sys.which(tool); if (nzchar(p)) return(unname(p)); ""
+}
+
+# TRUE if a TIFF/BigTIFF file is big-endian ("MM" header), FALSE if little ("II").
+.gb_tiff_bigendian <- function(path) {
+  con <- file(path, "rb"); on.exit(close(con))
+  identical(readBin(con, "raw", 2L), as.raw(c(0x4d, 0x4d)))
 }
 
 # Preflight for backend = "rbioformats": verify RBioFormats, rJava, and a
@@ -257,24 +263,40 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   NA_real_
 }
 
-# bfconvert + tiffcomment: turn a plain (multi-band or RGB) TIFF into an
-# OME-TIFF carrying the supplied OME-XML.
-.gb_write_ometiff <- function(plain_tif, ome_tif, ome_xml, bfconvert,
-                              tiffcomment, out_dir, keep_intermediate) {
-  xml_file <- file.path(out_dir, paste0(tools::file_path_sans_ext(basename(ome_tif)), ".xml"))
-  writeLines(ome_xml, xml_file, useBytes = TRUE)
-  message("  bfconvert -> ", basename(ome_tif))
-  st <- system2(bfconvert, c("-overwrite", shQuote(path.expand(plain_tif)),
-                             shQuote(path.expand(ome_tif))),
-                stdout = FALSE, stderr = FALSE)
-  if (!identical(st, 0L)) stop("bfconvert failed for ", basename(ome_tif), ".")
-  message("  tiffcomment -> inject OME-XML")
-  st <- system2(tiffcomment, c("-set", shQuote(path.expand(xml_file)),
-                               shQuote(path.expand(ome_tif))),
-                stdout = FALSE, stderr = FALSE)
-  if (!identical(st, 0L)) stop("tiffcomment failed for ", basename(ome_tif), ".")
-  if (!keep_intermediate) { unlink(plain_tif); unlink(xml_file) }
-  invisible(ome_tif)
+# Inject an OME-XML comment into an existing OME-TIFF using Bio-Formats'
+# TiffSaver via rJava -- the same operation the 'tiffcomment' CLI performs, but
+# in-process (no external tool). Bio-Formats classes ship inside RBioFormats.
+# Returns TRUE on success, FALSE on any failure (so callers can fall back).
+.gb_inject_comment_java <- function(ome_tif, xml) {
+  tryCatch({
+    path <- path.expand(ome_tif)
+    in_stream <- rJava::.jnew("loci/common/RandomAccessInputStream", path)
+    saver     <- rJava::.jnew("loci/formats/tiff/TiffSaver", path)
+    on.exit({
+      try(rJava::.jcall(in_stream, "V", "close"), silent = TRUE)
+      try(rJava::.jcall(saver,     "V", "close"), silent = TRUE)
+    }, add = TRUE)
+    jval <- rJava::.jcast(rJava::.jnew("java/lang/String", xml), "java/lang/Object")
+    # overwriteComment(RandomAccessInputStream in, Object value): reads the
+    # header itself to handle endianness / BigTIFF.
+    rJava::.jcall(saver, "V", "overwriteComment",
+                  rJava::.jcast(in_stream, "loci/common/RandomAccessInputStream"),
+                  jval)
+    TRUE
+  }, error = function(e) {
+    message("  in-process Java metadata injection failed: ", conditionMessage(e))
+    FALSE
+  })
+}
+
+# TRUE if the Bio-Formats classes needed for .gb_inject_comment_java are on the
+# (RBioFormats-provided) classpath. Assumes the JVM is already initialised.
+.gb_java_injector_available <- function() {
+  cls_ok <- function(cls) isTRUE(tryCatch({
+    rJava::.jfindClass(gsub("\\.", "/", cls)); TRUE
+  }, error = function(e) FALSE))
+  cls_ok("loci.formats.tiff.TiffSaver") &&
+    cls_ok("loci.common.RandomAccessInputStream")
 }
 
 # Read a CosMx *_fov_positions_file -> data.frame(FOV, x_px, y_px).
@@ -446,11 +468,21 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   (default), \code{"horizontal"}, \code{"both"}, or \code{"none"}.
 #' @param he_resample_method \pkg{terra} resampling method used to put H&E on the
 #'   IF grid. Default \code{"average"} (good for downsampling).
-#' @param backend \code{"bftools"} (default) or \code{"rbioformats"}. The
-#'   \code{"bftools"} path streams to disk and uses roughly constant memory
-#'   regardless of image size; \code{"rbioformats"} must hold the entire image
-#'   in RAM (as a double array plus a transpose copy) and can exhaust memory on
-#'   large mosaics, so prefer \code{"bftools"} for combined/whole-TMA images.
+#' @param backend \code{"bftools"} (default) or \code{"rbioformats"}. Both build
+#'   an OME-TIFF and then inject the generated OME-XML with \code{tiffcomment}
+#'   (so channel names/colours/physical size are embedded identically and
+#'   Minerva can read the file); \code{tiffcomment} is therefore required for
+#'   both. The \code{"bftools"} path builds the container with \code{bfconvert},
+#'   streams to disk, and uses roughly constant memory; \code{"rbioformats"}
+#'   builds it with \pkg{RBioFormats} but must hold the whole image in RAM, so
+#'   prefer \code{"bftools"} for large/combined images.
+#' @param metadata_injector How to embed the OME-XML: \code{"auto"} (default)
+#'   uses in-process Bio-Formats (\pkg{RBioFormats}, no external tool) when the
+#'   backend is \code{"rbioformats"} and the classes are available, otherwise
+#'   \code{tiffcomment}; \code{"java"} forces the in-process route (rbioformats
+#'   only, no fallback); \code{"tiffcomment"} forces the \code{tiffcomment} CLI.
+#'   With \code{backend = "rbioformats"}, \code{metadata_injector = "auto"} and
+#'   no \code{he_images}, no bftools tools are required at all.
 #' @param bftools_dir Directory with \code{bfconvert}/\code{tiffcomment}
 #'   (e.g. \code{"/Applications/bftools"}); otherwise found on \code{PATH}.
 #' @param keep_intermediate Keep intermediate plain \code{.tif}/\code{.xml}.
@@ -510,6 +542,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    he_flip            = c("vertical", "horizontal", "both", "none"),
                                    he_resample_method = "average",
                                    backend            = c("bftools", "rbioformats"),
+                                   metadata_injector  = c("auto", "tiffcomment", "java"),
                                    bftools_dir        = NULL,
                                    max_vsize          = NULL,
                                    java_heap          = NULL,
@@ -517,6 +550,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    overwrite          = TRUE) {
 
   backend <- match.arg(backend)
+  metadata_injector <- match.arg(metadata_injector)
   he_flip <- match.arg(he_flip)
   if (!requireNamespace("terra", quietly = TRUE))
     stop("Package 'terra' is required. install.packages('terra').")
@@ -548,34 +582,100 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
   # ---- preflight (fail upfront, before any stitching) -----------------------
-  # RGB H&E is always finalised with bftools, so bftools is required whenever
-  # the bftools backend is chosen OR H&E images are supplied.
-  need_bftools <- (backend == "bftools") || !is.null(he_images)
+  # The OME-XML is injected either in-process via Bio-Formats (no external tool,
+  # only for the rbioformats backend) or with the 'tiffcomment' CLI. bfconvert
+  # builds the OME-TIFF container for the bftools backend and for the RGB H&E.
+  java_inject <- FALSE
+  if (backend == "rbioformats") {
+    .gb_check_rbioformats(java_heap)            # inits JVM, loads RBioFormats
+    java_inject <- .gb_java_injector_available()
+  }
+  resolved_injector <- metadata_injector
+  if (resolved_injector == "auto")
+    resolved_injector <- if (java_inject) "java" else "tiffcomment"
+  if (resolved_injector == "java" && !java_inject)
+    stop("metadata_injector = 'java' needs the rbioformats backend with a ",
+         "working RBioFormats/Java (Bio-Formats TiffSaver classes were not ",
+         "found). Use 'auto' or 'tiffcomment', or backend = 'rbioformats'.",
+         call. = FALSE)
+
+  need_bfconvert   <- (backend == "bftools") || !is.null(he_images)
+  need_tiffcomment <- (resolved_injector == "tiffcomment")
   bfconvert <- tiffcomment <- ""
-  if (need_bftools) {
-    bfconvert   <- .gb_find_bftool("bfconvert",   bftools_dir)
+  if (need_tiffcomment) {
     tiffcomment <- .gb_find_bftool("tiffcomment", bftools_dir)
-    if (!nzchar(bfconvert) || !nzchar(tiffcomment)) {
-      why <- if (backend == "bftools") "backend = 'bftools'" else
-             "writing the H&E OME-TIFF (H&E always uses bftools)"
-      stop("Could not find 'bfconvert'/'tiffcomment', required for ", why, ". ",
-           "Set 'bftools_dir' (e.g. \"/Applications/bftools\") or add bftools ",
-           "to your PATH.", call. = FALSE)
+    if (!nzchar(tiffcomment))
+      stop("Could not find 'tiffcomment' (from bftools), needed to embed the ",
+           "OME metadata. Set 'bftools_dir' or add bftools to PATH, or (with ",
+           "backend = 'rbioformats') use metadata_injector = 'java'/'auto'.",
+           call. = FALSE)
+  }
+  if (need_bfconvert) {
+    bfconvert <- .gb_find_bftool("bfconvert", bftools_dir)
+    if (!nzchar(bfconvert)) {
+      why <- if (backend == "bftools") "backend = 'bftools'" else "the RGB H&E output"
+      stop("Could not find 'bfconvert' (from bftools), required for ", why,
+           ". Set 'bftools_dir' or add bftools to your PATH.", call. = FALSE)
     }
   }
-  # If the IF backend is rbioformats, make sure it can actually run before we
-  # spend time stitching.
-  if (backend == "rbioformats") .gb_check_rbioformats(java_heap)
+
+  # Inject an OME-XML comment into an existing OME-TIFF using the resolved
+  # method, with a tiffcomment fallback when 'auto' picked Java but it fails.
+  inject_ome_xml <- function(ome_tif, xml, stem) {
+    if (resolved_injector == "java") {
+      if (.gb_inject_comment_java(ome_tif, xml)) {
+        message("  injected OME-XML (in-process, no tiffcomment)")
+        return(invisible(TRUE))
+      }
+      if (metadata_injector == "java")
+        stop("In-process Java injection failed for ", basename(ome_tif),
+             " and metadata_injector = 'java' forbids fallback.", call. = FALSE)
+      tc <- .gb_find_bftool("tiffcomment", bftools_dir)   # auto fallback
+      if (!nzchar(tc))
+        stop("Java injection failed and no 'tiffcomment' is available to fall ",
+             "back on. Install bftools or repair RBioFormats/Java.", call. = FALSE)
+      message("  falling back to tiffcomment")
+    } else {
+      tc <- tiffcomment
+    }
+    xml_file <- file.path(out_dir, paste0(stem, ".ome.xml"))
+    writeLines(xml, xml_file, useBytes = TRUE)
+    message("  tiffcomment -> inject OME-XML")
+    st <- system2(tc, c("-set", shQuote(path.expand(xml_file)),
+                        shQuote(path.expand(ome_tif))), stdout = FALSE, stderr = FALSE)
+    if (!identical(st, 0L)) stop("tiffcomment failed for ", basename(ome_tif), ".")
+    if (!keep_intermediate) unlink(xml_file)
+    invisible(TRUE)
+  }
 
   # ---- helper: write an IF SpatRaster to a Minerva OME-TIFF -----------------
+  # Both backends now: (1) write an intermediate multi-band <stem>.tif with
+  # terra, (2) create the OME-TIFF container (bfconvert, or RBioFormats), then
+  # (3) inject the SAME generated OME-XML (in-process via Bio-Formats, or with
+  # tiffcomment), so channel names/colours/physical size are identical and
+  # Minerva-readable either way.
   write_if_ome <- function(rast, stem, eff_um, channels_df) {
     ome_tif <- file.path(out_dir, paste0(stem, ".ome.tif"))
     if (file.exists(ome_tif) && !overwrite) stop("Exists (overwrite=FALSE): ", ome_tif)
-    if (backend == "rbioformats") {
+
+    plain <- file.path(out_dir, paste0(stem, ".tif"))
+    message("  writing intermediate ", basename(plain), " ...")
+    terra::writeRaster(round(rast), plain, datatype = "INT2U", overwrite = TRUE,
+      names = channels_df$name, NAflag = 0,
+      wopt = list(gdal = c("COMPRESS=DEFLATE", "BIGTIFF=YES", "TILED=YES",
+                           "BLOCKXSIZE=512", "BLOCKYSIZE=512",
+                           "INTERLEAVE=BAND", "PHOTOMETRIC=MINISBLACK")))
+
+    if (backend == "bftools") {
+      message("  bfconvert -> ", basename(ome_tif))
+      st <- system2(bfconvert, c("-overwrite", shQuote(path.expand(plain)),
+                                 shQuote(path.expand(ome_tif))),
+                    stdout = FALSE, stderr = FALSE)
+      if (!identical(st, 0L)) stop("bfconvert failed for ", basename(ome_tif), ".")
+    } else {                                   # rbioformats
       # RBioFormats has no streaming writer: the whole image must fit in RAM as
-      # a double array (plus a transpose copy), unlike the disk-streaming
-      # bftools path. Estimate the peak and lift macOS's mem.maxVSize cap when
-      # possible; for very large mosaics prefer backend = "bftools".
+      # a double array (plus a transpose copy). Estimate the peak and lift
+      # macOS's mem.maxVSize cap when possible; for large mosaics use bftools.
       peak_gb <- .gb_rbf_peak_gb(rast)
       message(sprintf(
         "  RBioFormats loads the full image into RAM: ~%.1f GB peak (%.0f Mpx x %d ch). ",
@@ -584,36 +684,44 @@ stitch_fovs_to_ometiff <- function(fov_positions,
       old_vsize <- .gb_raise_vsize(peak_gb * 1024, max_vsize)
       if (is.finite(old_vsize)) on.exit(try(mem.maxVSize(old_vsize), silent = TRUE), add = TRUE)
 
-      arr <- terra::as.array(rast)          # [row, col, band]
-      arr <- aperm(arr, c(2, 1, 3))         # -> [col, row, band] for RBioFormats
+      arr <- terra::as.array(rast)             # [row, col, band]
+      arr <- aperm(arr, c(2, 1, 3))            # -> [col, row, band]
+      rbf_fail <- function(e) {
+        msg <- conditionMessage(e)
+        if (grepl("memory|vsize|heap|OutOfMemory", msg, ignore.case = TRUE))
+          stop("RBioFormats ran out of memory (~", sprintf("%.1f", peak_gb),
+               " GB needed). Use backend = 'bftools' (streams to disk), ",
+               "increase 'max_vsize'/'java_heap', or downsample more. Original: ",
+               msg, call. = FALSE)
+        stop("RBioFormats::write.image failed (", msg,
+             "); use backend = 'bftools'.", call. = FALSE)
+      }
+      # Prefer little-endian (to match the bftools output); fall back if the
+      # installed API does not accept the argument.
+      message("  RBioFormats -> ", basename(ome_tif))
       tryCatch(
         RBioFormats::write.image(arr, file = path.expand(ome_tif),
-                                 force = overwrite, pixelType = "uint16"),
+                                 force = overwrite, pixelType = "uint16",
+                                 littleEndian = TRUE),
         error = function(e) {
-          msg <- conditionMessage(e)
-          if (grepl("memory|vsize|heap|OutOfMemory", msg, ignore.case = TRUE))
-            stop("RBioFormats ran out of memory (~", sprintf("%.1f", peak_gb),
-                 " GB needed). Use backend = 'bftools' (streams to disk), ",
-                 "increase 'max_vsize', or downsample more. Original: ", msg,
-                 call. = FALSE)
-          stop("RBioFormats::write.image failed (", msg,
-               "); use backend = 'bftools'.", call. = FALSE)
+          if (grepl("unused argument|littleEndian", conditionMessage(e)))
+            tryCatch(RBioFormats::write.image(arr, file = path.expand(ome_tif),
+                                              force = overwrite, pixelType = "uint16"),
+                     error = rbf_fail)
+          else rbf_fail(e)
         })
       rm(arr); gc(verbose = FALSE)
-      message("Wrote (RBioFormats): ", ome_tif,
-              " -- verify channel names/colours in Minerva.")
-      return(ome_tif)
     }
-    plain <- file.path(out_dir, paste0(stem, ".tif"))
-    terra::writeRaster(round(rast), plain, datatype = "INT2U", overwrite = TRUE,
-      names = channels_df$name, NAflag = 0,
-      wopt = list(gdal = c("COMPRESS=DEFLATE", "BIGTIFF=YES", "TILED=YES",
-                           "BLOCKXSIZE=512", "BLOCKYSIZE=512",
-                           "INTERLEAVE=BAND", "PHOTOMETRIC=MINISBLACK")))
+
+    # Inject identical, structure-matching OME-XML (endianness detected from the
+    # file just written, so the XML always agrees with the pixel byte order).
+    big <- tryCatch(.gb_tiff_bigendian(ome_tif), error = function(e) FALSE)
     xml <- .gb_build_ome_xml(terra::ncol(rast), terra::nrow(rast), channels_df,
-                             eff_um, image_name = stem)
-    .gb_write_ometiff(plain, ome_tif, xml, bfconvert, tiffcomment, out_dir,
-                      keep_intermediate)
+                             eff_um, image_name = stem, big_endian = big)
+    inject_ome_xml(ome_tif, xml, stem)
+    if (!keep_intermediate) unlink(plain)
+    message("  wrote ", basename(ome_tif))
+    ome_tif
   }
 
   # ---- helper: resample an H&E raster onto an IF grid and write RGB OME ------
@@ -630,11 +738,18 @@ stitch_fovs_to_ometiff <- function(fov_positions,
       wopt = list(gdal = c("PHOTOMETRIC=RGB", "COMPRESS=LZW",
                            "INTERLEAVE=PIXEL", "BIGTIFF=YES")))
     unlink(tmp)
+    message("  bfconvert -> ", basename(ome_tif))
+    st <- system2(bfconvert, c("-overwrite", shQuote(path.expand(plain)),
+                               shQuote(path.expand(ome_tif))),
+                  stdout = FALSE, stderr = FALSE)
+    if (!identical(st, 0L)) stop("bfconvert failed for ", basename(ome_tif), ".")
+    big <- tryCatch(.gb_tiff_bigendian(ome_tif), error = function(e) FALSE)
     xml <- .gb_build_ome_xml_rgb(terra::ncol(grid_rast), terra::nrow(grid_rast),
-                                 eff_um, image_name = stem)
-    # bfconvert/tiffcomment were resolved upfront (H&E always uses bftools).
-    .gb_write_ometiff(plain, ome_tif, xml, bfconvert, tiffcomment, out_dir,
-                      keep_intermediate)
+                                 eff_um, image_name = stem, big_endian = big)
+    inject_ome_xml(ome_tif, xml, stem)
+    if (!keep_intermediate) unlink(plain)
+    message("  wrote ", basename(ome_tif))
+    ome_tif
   }
 
   # ---- helper: load + orient an H&E image into an IF slide's frame ----------
@@ -756,6 +871,8 @@ if (sys.nframe() == 0) {
       help = "terra resampling method for H&E [default= %default]"),
     optparse::make_option(c("-b", "--backend"), type = "character", default = "bftools",
       help = "'bftools' or 'rbioformats' [default= %default]"),
+    optparse::make_option(c("--metadata_injector"), type = "character", default = "auto",
+      help = "'auto', 'java' (rbioformats, no tiffcomment), or 'tiffcomment' [default= %default]"),
     optparse::make_option(c("-t", "--bftools_dir"), type = "character", default = NULL,
       help = "Directory with bfconvert/tiffcomment (else PATH)."),
     optparse::make_option(c("--max_vsize"), type = "double", default = NULL,
@@ -796,6 +913,7 @@ if (sys.nframe() == 0) {
     he_flip            = opt$he_flip,
     he_resample_method = opt$he_resample_method,
     backend            = opt$backend,
+    metadata_injector  = opt$metadata_injector,
     bftools_dir        = opt$bftools_dir,
     max_vsize          = opt$max_vsize,
     java_heap          = opt$java_heap,
