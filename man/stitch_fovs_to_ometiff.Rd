@@ -30,6 +30,7 @@ stitch_fovs_to_ometiff(
   poly_y_col = "y_slide_mm",
   poly_coord_units = c("mm", "px"),
   poly_flip_y = TRUE,
+  poly_align = c("center", "bbox", "none"),
   poly_x_offset_px = 0,
   poly_y_offset_px = NULL,
   poly_border_value = 9999999L,
@@ -132,8 +133,19 @@ converted with \code{1000 / pixel_size_um}) or \code{"px"}.}
 \item{poly_flip_y}{Logical; negate y to match the raster's flipped frame.
 Default \code{TRUE}.}
 
+\item{poly_align}{How to place each slide's polygons onto its image:
+\code{"center"} (default) keeps the unit scale but translates so the
+polygon bounding-box centre matches the image centre; \code{"bbox"} scales
+and translates the polygon bounding box to fill the image extent (use only
+if the unit scale is unknown, as it can distort); \code{"none"} applies only
+the manual \code{poly_x_offset_px}/\code{poly_y_offset_px}. \code{"center"}
+is robust across coordinate sources (e.g. Seurat segmentation coordinates,
+whose origin often differs from the FOV positions), which is why it is the
+default; a per-slide diagnostic line prints the polygon and image spans so
+you can confirm the overlay.}
+
 \item{poly_x_offset_px, poly_y_offset_px}{Constant offsets (in original px)
-added after unit conversion/flip to align polygons to the raster origin.
+added after unit conversion/flip, used only when \code{poly_align = "none"}.
 Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
 resolves to \code{-fov_size_px}).}
 
