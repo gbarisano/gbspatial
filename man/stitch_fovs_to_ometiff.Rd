@@ -30,9 +30,9 @@ stitch_fovs_to_ometiff(
   poly_y_col = "y_slide_mm",
   poly_coord_units = c("mm", "px"),
   poly_flip_y = TRUE,
-  poly_align = c("center", "bbox", "none"),
+  poly_align = c("none", "center", "bbox"),
   poly_x_offset_px = 0,
-  poly_y_offset_px = NULL,
+  poly_y_offset_px = 0,
   poly_border_value = 9999999L,
   poly_border_label = "Cell Border",
   backend = c("bftools", "rbioformats"),
@@ -130,24 +130,26 @@ y column names. Defaults \code{"cell_ID"}, \code{"x_slide_mm"},
 \item{poly_coord_units}{Units of the polygon x/y: \code{"mm"} (default,
 converted with \code{1000 / pixel_size_um}) or \code{"px"}.}
 
-\item{poly_flip_y}{Logical; negate y to match the raster's flipped frame.
-Default \code{TRUE}.}
+\item{poly_flip_y}{Logical; negate y to match the raster's flipped frame
+(the raster uses \code{-y_global}). Default \code{TRUE}. If your polygon y
+is already negative (e.g. Seurat has pre-flipped it), set \code{FALSE}.}
 
 \item{poly_align}{How to place each slide's polygons onto its image:
-\code{"center"} (default) keeps the unit scale but translates so the
-polygon bounding-box centre matches the image centre; \code{"bbox"} scales
-and translates the polygon bounding box to fill the image extent (use only
-if the unit scale is unknown, as it can distort); \code{"none"} applies only
-the manual \code{poly_x_offset_px}/\code{poly_y_offset_px}. \code{"center"}
-is robust across coordinate sources (e.g. Seurat segmentation coordinates,
-whose origin often differs from the FOV positions), which is why it is the
-default; a per-slide diagnostic line prints the polygon and image spans so
-you can confirm the overlay.}
+\code{"none"} (default) applies only unit conversion, the y-flip, and the
+manual \code{poly_x_offset_px}/\code{poly_y_offset_px} -- i.e. it assumes
+the polygon coordinates live in the same global frame as the FOV positions
+(top-left-corner origin), which for CosMx gives an exact overlay with zero
+offsets; \code{"center"} translates the polygon bounding-box centre to the
+image centre (approximate: only exact if the tissue is centred in the FOV
+grid); \code{"bbox"} scales and translates the bounding box to fill the
+image extent (can distort). A per-slide diagnostic prints the raw span, the
+units+flip span, and the image span so you can read off any residual offset.}
 
 \item{poly_x_offset_px, poly_y_offset_px}{Constant offsets (in original px)
 added after unit conversion/flip, used only when \code{poly_align = "none"}.
-Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
-resolves to \code{-fov_size_px}).}
+Both default to \code{0} (exact when the polygon coordinates share the FOV
+positions' global frame). If the diagnostic shows a constant gap between the
+units+flip span and the image span, set these to that gap.}
 
 \item{poly_border_value, poly_border_label}{Integer burned into the \code{.tif}
 for cell borders and its CSV label. Defaults \code{9999999} and
