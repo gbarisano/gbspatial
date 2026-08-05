@@ -52,8 +52,11 @@ single directory reused for all slides).}
 
 \item{out_dir}{Output directory (created if needed).}
 
-\item{slide_names}{Optional slide names (output stems). Defaults to the names
-of \code{fov_positions} or \code{slide1..N}.}
+\item{slide_names}{Optional slide names (also the output stems). If omitted,
+taken from the names of \code{fov_positions} when it is a named list,
+otherwise derived from the folder containing each positions file (the CosMx
+per-slide flatFiles folder, usually equal to \code{Run_Tissue_name}), so
+they line up with the polygon slide column; falls back to \code{slide1..N}.}
 
 \item{fov_size_px}{FOV edge length in pixels. Default \code{4256}.}
 
@@ -112,9 +115,12 @@ below.}
 column) in the Seurat \code{meta.data} or the polygon table. Required when
 generating polygons.}
 
-\item{poly_slide_col}{Slide-identifier column used to split a combined input
-by slide; its values must match \code{slide_names}. Default
-\code{"Run_Tissue_name"}.}
+\item{poly_slide_col}{Slide-identifier column in a combined input, used to
+assign each cell to a slide and keep only the slide(s) being processed (so a
+multi-slide Seurat object run on one slide contributes only that slide's
+cells); its values must match \code{slide_names}. When you instead pass one
+input per slide, cells are assigned positionally and this column is ignored.
+Default \code{"Run_Tissue_name"}.}
 
 \item{poly_cell_col, poly_x_col, poly_y_col}{For table input: the cell-id, x and
 y column names. Defaults \code{"cell_ID"}, \code{"x_slide_mm"},
