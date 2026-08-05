@@ -18,6 +18,8 @@ You can install the development version of gbspatial from
 ``` r
 #devtools::install_github("gbarisano/gbspatial")
 #OR
+#remotes::install_github("gbarisano/gbspatial")
+#OR
 #pak::pak("gbarisano/gbspatial")
 library(gbspatial)
 ```
