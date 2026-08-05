@@ -11,66 +11,80 @@ export(dataprep_cosmx)
 export(stitch_fovs_to_ometiff)
 importFrom(Matrix,Matrix)
 importFrom(Polychrome,palette36.colors)
-importFrom(data.table,fread)
-importFrom(data.table,rbindlist)
-importFrom(data.table,setDF)
-importFrom(dplyr,"%>%")
-importFrom(dplyr,bind_rows)
-importFrom(dplyr,coalesce)
-importFrom(dplyr,filter)
-importFrom(dplyr,group_by)
-importFrom(dplyr,left_join)
-importFrom(dplyr,mutate)
-importFrom(dplyr,row_number)
-importFrom(dplyr,select)
-importFrom(dplyr,slice_max)
-importFrom(dplyr,slice_sample)
-importFrom(dplyr,summarise)
-importFrom(dplyr,ungroup)
-importFrom(ggplot2,.data)
-importFrom(ggplot2,aes)
-importFrom(ggplot2,coord_equal)
-importFrom(ggplot2,element_blank)
-importFrom(ggplot2,element_text)
-importFrom(ggplot2,expansion)
-importFrom(ggplot2,geom_hline)
-importFrom(ggplot2,geom_point)
-importFrom(ggplot2,geom_rect)
-importFrom(ggplot2,geom_text)
-importFrom(ggplot2,geom_vline)
-importFrom(ggplot2,ggplot)
-importFrom(ggplot2,labs)
-importFrom(ggplot2,scale_fill_manual)
-importFrom(ggplot2,scale_x_continuous)
-importFrom(ggplot2,scale_y_continuous)
-importFrom(ggplot2,theme)
-importFrom(ggplot2,theme_minimal)
-importFrom(grDevices,colorRampPalette)
-importFrom(grDevices,dev.control)
-importFrom(grDevices,dev.off)
-importFrom(grDevices,pdf)
-importFrom(grDevices,png)
-importFrom(grDevices,recordPlot)
-importFrom(graphics,legend)
-importFrom(graphics,par)
-importFrom(graphics,plot)
-importFrom(graphics,plot.new)
-importFrom(graphics,rect)
-importFrom(graphics,text)
+importFrom(data.table,
+  fread,
+  rbindlist,
+  setDF
+)
+importFrom(dplyr,
+  "%>%",
+  bind_rows,
+  coalesce,
+  filter,
+  group_by,
+  left_join,
+  mutate,
+  row_number,
+  select,
+  slice_max,
+  slice_sample,
+  summarise,
+  ungroup
+)
+importFrom(ggplot2,
+  .data,
+  aes,
+  coord_equal,
+  element_blank,
+  element_text,
+  expansion,
+  geom_hline,
+  geom_point,
+  geom_rect,
+  geom_text,
+  geom_vline,
+  ggplot,
+  labs,
+  scale_fill_manual,
+  scale_x_continuous,
+  scale_y_continuous,
+  theme,
+  theme_minimal
+)
+importFrom(grDevices,
+  colorRampPalette,
+  dev.control,
+  dev.off,
+  pdf,
+  png,
+  recordPlot
+)
+importFrom(graphics,
+  legend,
+  par,
+  plot,
+  plot.new,
+  rect,
+  text
+)
 importFrom(methods,as)
-importFrom(stats,aggregate)
-importFrom(stats,as.formula)
-importFrom(stats,ave)
-importFrom(stats,dist)
-importFrom(stats,lm)
-importFrom(stats,median)
-importFrom(stats,na.omit)
-importFrom(stats,p.adjust)
-importFrom(stats,setNames)
+importFrom(stats,
+  aggregate,
+  as.formula,
+  ave,
+  dist,
+  lm,
+  median,
+  na.omit,
+  p.adjust,
+  setNames
+)
 importFrom(tidyr,pivot_longer)
-importFrom(utils,capture.output)
-importFrom(utils,installed.packages)
-importFrom(utils,read.csv)
-importFrom(utils,setTxtProgressBar)
-importFrom(utils,txtProgressBar)
-importFrom(utils,write.csv)
+importFrom(utils,
+  capture.output,
+  installed.packages,
+  read.csv,
+  setTxtProgressBar,
+  txtProgressBar,
+  write.csv
+)

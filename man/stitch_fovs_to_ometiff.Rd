@@ -13,116 +13,140 @@ stitch_fovs_to_ometiff(
   downsample_factor = 8L,
   pixel_size_um = 0.120280945,
   channels = NULL,
+  stitch_slides = FALSE,
+  slide_layout = NULL,
+  combine_downsample = 1L,
+  slide_gap = 0,
+  combine_name = "combined",
+  he_images = NULL,
+  he_flip = c("vertical", "horizontal", "both", "none"),
+  he_resample_method = "average",
   backend = c("bftools", "rbioformats"),
   bftools_dir = NULL,
+  max_vsize = NULL,
   keep_intermediate = FALSE,
   overwrite = TRUE
 )
 }
 \arguments{
 \item{fov_positions}{Path to a CosMx \code{*_fov_positions_file.csv(.gz)} (or
-an already-read data.frame), or a (named) list/vector of these for multiple
-slides. Must contain a FOV column and either px (\code{x_global_px},
-\code{y_global_px}) or mm (\code{x_global_mm}, \code{y_global_mm}) columns.}
+a data.frame), or a (named) list/vector of these, one per slide.}
 
-\item{image_dir}{Directory containing the per-FOV morphology TIFFs
-(e.g. a \code{Morphology2D} folder), or a list/vector of directories, one
-per slide, matching \code{fov_positions}.}
+\item{image_dir}{Morphology2D directory (or list/vector, one per slide, or a
+single directory reused for all slides).}
 
-\item{out_dir}{Output directory. Created if it does not exist.}
+\item{out_dir}{Output directory (created if needed).}
 
-\item{slide_names}{Optional character vector of slide names (used for output
-file names \code{<slide>.ome.tif}). Defaults to the names of
-\code{fov_positions}, or \code{slide1..N}.}
+\item{slide_names}{Optional slide names (output stems). Defaults to the names
+of \code{fov_positions} or \code{slide1..N}.}
 
-\item{fov_size_px}{Integer FOV edge length in pixels of the original images.
-Default \code{4256}.}
+\item{fov_size_px}{FOV edge length in pixels. Default \code{4256}.}
 
-\item{downsample_factor}{Integer >= 1. Averages blocks of this size; 8 gives
-good resolution at a Minerva-friendly size when you have 4 TMAs for example.
-Default \code{1}.}
+\item{downsample_factor}{Per-FOV block-mean downsampling (>=1). Default \code{8}.}
 
-\item{pixel_size_um}{Physical size of one original pixel, in microns. Default
-\code{0.120280945} (CosMx). The written \code{PhysicalSize} is scaled by
-\code{downsample_factor}.}
+\item{pixel_size_um}{Original pixel size in microns. Default \code{0.120280945}.
+Written \code{PhysicalSize} = \code{pixel_size_um * downsample_factor}
+(times \code{combine_downsample} for the combined image).}
 
-\item{channels}{Channel definition. \code{NULL} (default) uses the CosMx
-5-plex protein preset when there are 5 bands, otherwise generic names; a
-preset name (\code{"cosmx_protein"}); a character vector of names; or a
-data.frame with columns \code{name} and optionally \code{color},
-\code{excitation}, \code{emission}. The order MUST match the TIFF band
-order (CosMx protein morphology is B,G,Y,R,U =
-PanCK, CD68, Membrane, CD45, DAPI).}
+\item{channels}{Channel definition: \code{NULL} (CosMx 5-plex preset when 5
+bands, else generic), a preset name (\code{"cosmx_protein"}), a character
+vector of names, or a data.frame with \code{name} and optional
+\code{color}/\code{excitation}/\code{emission}. Order must match TIFF bands.}
 
-\item{backend}{One of \code{"bftools"} (default) or \code{"rbioformats"}.}
+\item{stitch_slides}{Logical. If \code{TRUE} and more than one slide is given,
+combine them into a single image. Default \code{FALSE}.}
 
-\item{bftools_dir}{Directory holding \code{bfconvert}/\code{tiffcomment}
-(e.g. \code{"/Applications/bftools"}). If \code{NULL}, they are looked up on
-the \code{PATH}. Only used for \code{backend = "bftools"}.}
+\item{slide_layout}{Grid for combining: \code{NULL} (single row), a single
+integer (number of rows; columns inferred), or \code{c(nrow, ncol)}. Slides
+fill the grid row by row in input order.}
 
-\item{keep_intermediate}{Logical; keep the intermediate plain \code{.tif}
-(bftools backend). Default \code{FALSE}.}
+\item{combine_downsample}{Extra block-mean downsampling applied to the
+combined image (>=1). Default \code{1}.}
 
-\item{overwrite}{Logical; overwrite existing output files. Default \code{TRUE}.}
+\item{slide_gap}{Gap between slides on the grid, in pixels of the per-FOV-
+downsampled frame. Default \code{0} (abutting).}
+
+\item{combine_name}{Output stem for the combined image(s). Default
+\code{"combined"}.}
+
+\item{he_images}{Optional co-registered H&E image(s): a path or list/vector of
+paths, one per slide (length must equal the number of slides). RGB.}
+
+\item{he_flip}{How to flip H&E to match the IF Y-orientation: \code{"vertical"}
+(default), \code{"horizontal"}, \code{"both"}, or \code{"none"}.}
+
+\item{he_resample_method}{\pkg{terra} resampling method used to put H&E on the
+IF grid. Default \code{"average"} (good for downsampling).}
+
+\item{backend}{\code{"bftools"} (default) or \code{"rbioformats"}. The
+\code{"bftools"} path streams to disk and uses roughly constant memory
+regardless of image size; \code{"rbioformats"} must hold the entire image
+in RAM (as a double array plus a transpose copy) and can exhaust memory on
+large mosaics, so prefer \code{"bftools"} for combined/whole-TMA images.}
+
+\item{bftools_dir}{Directory with \code{bfconvert}/\code{tiffcomment}
+(e.g. \code{"/Applications/bftools"}); otherwise found on \code{PATH}.}
+
+\item{max_vsize}{Only used by \code{backend = "rbioformats"} on macOS: the R
+vector-memory limit in MB to set via \code{\link[base]{mem.maxVSize}}
+(or \code{Inf} to remove it). \code{NULL} (default) auto-raises the cap to
+the estimated need when the current cap is lower; the previous value is
+restored afterwards. Raising the cap only helps if physical RAM allows it.}
+
+\item{keep_intermediate}{Keep intermediate plain \code{.tif}/\code{.xml}.
+Default \code{FALSE}.}
+
+\item{overwrite}{Overwrite existing outputs. Default \code{TRUE}.}
 }
 \value{
 (Invisibly) a character vector of the OME-TIFF paths written.
 }
 \description{
-Takes the per-FOV multi-channel morphology TIFFs produced by a CosMx run and
-stitches them, using the FOV global coordinates, into a single (optionally
-downsampled) multi-channel image per slide. The result is written as an
-OME-TIFF whose OME-XML metadata is generated programmatically so that
-\href{https://github.com/labsyspharm/minerva-story}{Minerva} reads channels,
-colours and physical pixel size correctly. No hand-made metadata XML file is
-required.
+Stitches the per-FOV morphology TIFFs of a CosMx run into one multi-channel
+image per slide and writes it as an OME-TIFF whose metadata Minerva reads
+correctly (channel names/colours, physical pixel size). Optionally combines
+several slides onto a grid, and optionally processes a co-registered H&E
+image per slide so that its OME-TIFF shares the exact spatial grid and
+physical size of the IF output.
 }
 \details{
-The stitching engine is \pkg{terra}: each FOV is loaded, optionally
-down-sampled by averaging (\code{aggregate(fun = "mean")}), given a spatial
-extent from its global pixel coordinates (Y is flipped so tiles assemble on a
-Cartesian plane), and the tiles are merged; empty background is set to 0.
+Stitching uses \pkg{terra}: each FOV is down-sampled by block-mean, placed by
+its global pixel coordinates (Y flipped), and the tiles are merged.
 
-\strong{Metadata.} Only the parts Minerva needs are emitted: the
-\code{Pixels} dimensions (of the actual stitched, down-sampled image), one
-\code{Channel} per band with \code{Name}/\code{Color} (and optional
-excitation/emission), and the \code{TiffData} IFD map (one plane per
-channel). \code{PhysicalSizeX/Y} is \code{pixel_size_um * downsample_factor}.
-The large CosMx JSON acquisition block is deliberately dropped.
+When \code{stitch_slides = TRUE}, the per-slide mosaics are shifted onto a
+grid (\code{slide_layout} rows x cols, filled in input order), merged and
+optionally down-sampled again by \code{combine_downsample}; a single combined
+OME-TIFF is written.
 
-\strong{Backends} (\code{backend}):
-\itemize{
-\item \code{"bftools"} (default, most robust; supports BigTIFF): \pkg{terra}
-writes a tiled multi-band TIFF, \code{bfconvert} re-lays it out as a
-proper one-plane-per-channel OME-TIFF, then \code{tiffcomment} injects the
-generated OME-XML. Requires Bio-Formats command-line tools
-(\code{bfconvert}, \code{tiffcomment}).
-\item \code{"rbioformats"} (experimental; no command-line tools, but pulls
-in the \pkg{RBioFormats} Bioconductor package and Java): writes the
-OME-TIFF directly from R. If the installed API does not match, the
-function stops with a message suggesting \code{backend = "bftools"}.
-}
+When \code{he_images} is supplied, each H&E image (assumed co-registered to
+the corresponding IF) is flipped (\code{he_flip}), given the IF slide's
+coordinate frame, carried through the same grid placement, then
+\strong{resampled onto the exact IF output grid}. The H&E OME-TIFF therefore
+has identical \code{SizeX/SizeY} and \code{PhysicalSize} to the IF output
+(guaranteeing overlay in Minerva) but correct 8-bit RGB channel metadata.
+
+Metadata is generated programmatically; no external OME-XML file is needed.
+Backends: \code{"bftools"} (default; needs \code{bfconvert}/\code{tiffcomment},
+supports BigTIFF) or \code{"rbioformats"} (experimental, no CLI tools).
 }
 \examples{
 \dontrun{
-# Single slide, CosMx 5-plex protein morphology, 8x downsample:
-stitch_fovs_to_ometiff(
-  fov_positions = "mytma/flatFiles/tma1/mytma_fov_positions_file.csv.gz",
-  image_dir     = "mytma/DecodedFiles/tma1/20240404_004321_S2/CellStatsDir/Morphology2D",
-  out_dir       = "mytma/ometiff/downsampled8"
-)
+# One slide, IF only:
+stitch_fovs_to_ometiff("usc1/.../fov_positions_file.csv.gz",
+                       "~/Morphology2D/usc1", "~/out")
 
-# Multiple slides with explicit channel names/colours:
+# Three slides stitched into a single row, extra 2x downsample, with H&E:
 stitch_fovs_to_ometiff(
-  fov_positions = list(tma1 = "flatFiles/tma1/fov_positions_file.csv.gz",
-                       tma2 = "flatFiles/tma2/fov_positions_file.csv.gz"),
-  image_dir     = list(tma1 = "DecodedFiles/tma1/20240404_004321_S2/CellStatsDir/Morphology2D",
-                       tma2 = "DecodedFiles/tma2/20250427_010603_S1/CellStatsDir/Morphology2D"),
-  out_dir       = "mytma/ometiff/downsampled8",
-  channels      = data.frame(
-    name  = c("PanCK","CD68","Membrane","CD45","DAPI"),
-    color = c("green","yellow","cyan","magenta","white"))
-)
+  fov_positions = list(usc1 = "usc1/.../fov_positions_file.csv.gz",
+                       usc2 = "usc2/.../fov_positions_file.csv.gz",
+                       usc5 = "usc5/.../fov_positions_file.csv.gz"),
+  image_dir     = list("~/Morphology2D/usc1", "~/Morphology2D/usc2",
+                       "~/Morphology2D/usc5"),
+  out_dir       = "~/out",
+  stitch_slides = TRUE, slide_layout = c(1, 3), combine_downsample = 2,
+  he_images     = c("~/reg/usc1/he_via_fullIF_smooth.tif",
+                    "~/reg/usc2/he_via_fullIF_smooth.tif",
+                    "~/reg/usc5/he_via_fullIF_smooth.tif"))
 }
 
 }
