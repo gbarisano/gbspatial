@@ -14,6 +14,15 @@
 #' @noRd
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+#' Format a number of seconds as a compact human-readable string
+#' @noRd
+.lr_fmt_time <- function(s) {
+  if (!is.finite(s)) return("?")
+  if (s < 90)      return(sprintf("%.0fs", s))
+  if (s < 5400)    return(sprintf("%.1fm", s / 60))
+  sprintf("%.1fh", s / 3600)
+}
+
 #' Build a cells x types sparse indicator matrix, keeping ALL requested levels
 #'
 #' Base \code{model.matrix}/\code{sparse.model.matrix} silently drop factor levels
@@ -91,9 +100,12 @@
   fam <- NA_character_; m <- NULL
   if (identical(family_pref, "tweedie")) {
     form <- stats::as.formula(paste0("score ~ ", fixed, reff, offs))
-    m <- tryCatch(glmmTMB::glmmTMB(form, data = d,
-                                   family = glmmTMB::tweedie(link = "log")),
-                  error = function(e) NULL, warning = function(w) NULL)
+    # suppressWarnings (not a warning handler): a convergence warning should not
+    # abort the fit -- doing so also trips glmmTMB's internal system.time and
+    # prints "Timing stopped at:". We judge convergence from pdHess below.
+    m <- tryCatch(suppressWarnings(glmmTMB::glmmTMB(form, data = d,
+                                   family = glmmTMB::tweedie(link = "log"))),
+                  error = function(e) NULL)
     fam <- "tweedie"
     ok <- !is.null(m) && isTRUE(tryCatch(m$sdr$pdHess, error = function(e) FALSE))
     if (!ok) m <- NULL
@@ -101,7 +113,8 @@
   if (is.null(m)) {   # Gaussian(log1p) fallback (or primary if family_pref == "gaussian")
     d$y <- if (use_offset) log1p(d$score / d$contacts) else log1p(d$score)
     form2 <- stats::as.formula(paste0("y ~ ", fixed, reff))
-    m <- tryCatch(glmmTMB::glmmTMB(form2, data = d), error = function(e) NULL)
+    m <- tryCatch(suppressWarnings(glmmTMB::glmmTMB(form2, data = d)),
+                  error = function(e) NULL)
     fam <- "gaussian_log1p"
     if (is.null(m)) return(NULL)
   }
@@ -588,7 +601,42 @@ SpatialLRContrast <- function(object = NULL,
   }
   blocks_of <- function(grp) unique(as.character(gmeta$block[gmeta$group == grp]))
 
-  pairs_tbl <- unique(perglom[, c("interaction", "pathway", "sender", "receiver")])
+  # Index perglom ONCE by (interaction, sender, receiver) so each tested
+  # combination is fetched directly instead of re-scanning all ~millions of
+  # per-region rows for every combination (the previous O(rows x combinations)
+  # cost was the dominant runtime).
+  key        <- paste(perglom$interaction, perglom$sender, perglom$receiver, sep = "\u001f")
+  row_groups <- split(seq_len(nrow(perglom)), key)
+  first_idx  <- vapply(row_groups, function(z) z[1L], integer(1))
+  grp_meta   <- perglom[first_idx, c("interaction", "pathway", "sender", "receiver"), drop = FALSE]
+  rownames(grp_meta) <- NULL
+  n_groups   <- length(row_groups)
+  say(sprintf("Testing up to %d cell-type pair(s) per contrast across %d contrast(s)%s.",
+              n_groups, length(contrasts),
+              if (isTRUE(parallel)) sprintf(" (parallel: %d cores)", n_cores) else ""))
+
+  # fit one combination k for the current contrast (returns a 1-row df or NULL)
+  fit_group <- function(k, disease, ref, blocks_shared, cname) {
+    dat <- perglom[row_groups[[k]], , drop = FALSE]
+    dd  <- dat[dat$group %in% c(disease, ref) & dat$contacts > 0, , drop = FALSE]
+    if (has_block && isTRUE(match_blocks))
+      dd <- dd[as.character(dd$block) %in% blocks_shared, , drop = FALSE]
+    if (!nrow(dd)) return(NULL)
+    gf <- factor(as.character(dd$group), levels = c(ref, disease))
+    ng <- tabulate(gf, nbins = 2L); names(ng) <- c(ref, disease)
+    if (any(ng < min_region)) return(NULL)
+    if (has_patient) {
+      np <- c(length(unique(dd$patient[gf == ref])), length(unique(dd$patient[gf == disease])))
+      if (any(np < min_patient)) return(NULL)
+    }
+    r <- .lr_fit_one(dat, disease = disease, ref = ref, blocks_shared = blocks_shared,
+                     has_block = has_block, has_patient = has_patient,
+                     use_offset = use_offset, family_pref = family)
+    if (is.null(r)) return(NULL)
+    cbind(data.frame(contrast = cname, stringsAsFactors = FALSE),
+          grp_meta[k, , drop = FALSE], r)
+  }
+
   results <- list()
   for (cname in names(contrasts)) {
     spec <- contrasts[[cname]]
@@ -600,27 +648,30 @@ SpatialLRContrast <- function(object = NULL,
       next
     }
     say("== ", cname, " ==")
-    res_c <- lapply_fun(seq_len(nrow(pairs_tbl)), function(k) {
-      key <- pairs_tbl[k, ]
-      dat <- perglom[perglom$interaction == key$interaction &
-                       perglom$sender == key$sender &
-                       perglom$receiver == key$receiver, , drop = FALSE]
-      # quick support pre-check to avoid fitting hopeless pairs
-      dd <- dat[dat$group %in% c(disease, ref) & dat$contacts > 0, , drop = FALSE]
-      if (has_block && isTRUE(match_blocks))
-        dd <- dd[as.character(dd$block) %in% blocks_shared, , drop = FALSE]
-      arms <- split(dd, factor(as.character(dd$group), levels = c(ref, disease)))
-      if (length(arms) < 2L) return(NULL)
-      ng <- vapply(arms, nrow, integer(1))
-      np <- if (has_patient) vapply(arms, function(a) length(unique(a$patient)), integer(1))
-            else stats::setNames(rep(1L, length(arms)), names(arms))
-      if (any(ng < min_region) || any(np < min_patient)) return(NULL)
-      r <- .lr_fit_one(dat, disease = disease, ref = ref, blocks_shared = blocks_shared,
-                       has_block = has_block, has_patient = has_patient,
-                       use_offset = use_offset, family_pref = family)
-      if (is.null(r)) return(NULL)
-      cbind(data.frame(contrast = cname, stringsAsFactors = FALSE), key, r)
-    })
+
+    if (isTRUE(parallel) && requireNamespace("parallel", quietly = TRUE)) {
+      res_c <- parallel::mclapply(seq_len(n_groups), fit_group,
+                                  disease = disease, ref = ref,
+                                  blocks_shared = blocks_shared, cname = cname,
+                                  mc.cores = n_cores)
+    } else {
+      res_c <- vector("list", n_groups)
+      t0    <- proc.time()[["elapsed"]]
+      step  <- max(1L, n_groups %/% 200L)          # ~200 progress updates
+      for (k in seq_len(n_groups)) {
+        res_c[[k]] <- fit_group(k, disease, ref, blocks_shared, cname)
+        if (isTRUE(verbose) && (k %% step == 0L || k == n_groups)) {
+          el   <- proc.time()[["elapsed"]] - t0
+          frac <- k / n_groups
+          eta  <- if (frac > 0) el * (1 - frac) / frac else NA_real_
+          cat(sprintf("\r  %s  %5.1f%%  (%d/%d)  elapsed %s  ETA %s      ",
+                      cname, 100 * frac, k, n_groups,
+                      .lr_fmt_time(el), .lr_fmt_time(eta)))
+          utils::flush.console()
+        }
+      }
+      if (isTRUE(verbose)) cat("\n")
+    }
     res_c <- do.call(rbind, res_c)
     if (!is.null(res_c) && nrow(res_c)) res_c$padj <- stats::p.adjust(res_c$p, padj_method)
     results[[cname]] <- res_c
