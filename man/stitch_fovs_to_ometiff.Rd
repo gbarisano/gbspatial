@@ -149,7 +149,9 @@ units+flip span, and the image span so you can read off any residual offset.}
 added after unit conversion/flip, used only when \code{poly_align = "none"}.
 Both default to \code{0} (exact when the polygon coordinates share the FOV
 positions' global frame). If the diagnostic shows a constant gap between the
-units+flip span and the image span, set these to that gap.}
+units+flip span and the image span, set these to that gap. Each may also be
+a named vector (names = slide names) to give a different offset per slide,
+e.g. \code{poly_x_offset_px = c(MNCharu = -656, TA648 = -160)}.}
 
 \item{poly_border_value, poly_border_label}{Integer burned into the \code{.tif}
 for cell borders and its CSV label. Defaults \code{9999999} and
