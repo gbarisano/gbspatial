@@ -595,17 +595,44 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   v
 }
 
-# Transform vertex coordinates (per slide), align to the slide's raster frame,
+# Estimate the (dx, dy) in world units to add to polygon coordinates (px, py) so
+# they line up with the tissue in `tissue` (a SpatRaster), via coarse FFT phase
+# correlation. Robust to the sparse cells-within-cores pattern because it
+# correlates occupancy grids. Returns c(0, 0) if it cannot lock on.
+.gb_register_shift <- function(tissue, px, py, ncoarse = 256L) {
+  e <- as.vector(terra::ext(tissue))                    # xmin,xmax,ymin,ymax
+  agg <- max(1L, as.integer(floor(min(terra::nrow(tissue), terra::ncol(tissue)) / ncoarse)))
+  tr <- if (agg > 1L) terra::aggregate(tissue[[1]], fact = agg, fun = "max") else tissue[[1]]
+  tb <- terra::as.matrix(tr, wide = TRUE); tb[is.na(tb)] <- 0
+  tb <- (tb > 0) * 1.0
+  nr <- nrow(tb); nc <- ncol(tb)
+  if (!nr || !nc || !any(tb > 0) || !length(px)) return(c(0, 0))
+  cx <- floor((px - e[1]) / (e[2] - e[1]) * nc) + 1L
+  ry <- floor((e[4] - py) / (e[4] - e[3]) * nr) + 1L    # world y high = top row
+  keep <- is.finite(cx) & is.finite(ry) & cx >= 1 & cx <= nc & ry >= 1 & ry <= nr
+  if (!any(keep)) return(c(0, 0))
+  pb <- matrix(0, nr, nc); pb[cbind(ry[keep], cx[keep])] <- 1
+  A <- stats::fft(tb); B <- stats::fft(pb)
+  R <- A * Conj(B); R <- R / (Mod(R) + 1e-9)
+  cc <- Re(stats::fft(R, inverse = TRUE)) / length(R)
+  mi <- which(cc == max(cc), arr.ind = TRUE)[1, ]
+  dr <- mi[1] - 1L; dc <- mi[2] - 1L
+  if (dr > nr / 2) dr <- dr - nr
+  if (dc > nc / 2) dc <- dc - nc
+  cellw <- (e[2] - e[1]) / nc; cellh <- (e[4] - e[3]) / nr
+  c(dc * cellw, -dr * cellh)                            # add to (px, py)
+}
+
 # shift onto the grid, then rasterize filled cells + borders onto `template` and
 # write <stem>_polygons.tif and _polygons.csv.
 #   slide_ext : named list slide -> c(xmin, xmax, ymin, ymax) of that slide's
 #               (pre-grid-shift) IF raster, used to align polygons to the image.
-#   align     : "center" (translate bbox-centre to raster-centre, keep scale),
-#               "bbox" (scale+translate bbox onto the raster extent), or
-#               "none"  (use the manual x_off/y_off only).
+#   slide_rast: named list slide -> that slide's IF SpatRaster (for "register").
+#   align     : "none" (manual x_off/y_off), "register" (auto FFT-align to the
+#               tissue), "center" (bbox-centre to image-centre) or "bbox".
 .gb_write_polygons <- function(verts, state_map, template, slide_set, shifts,
-                               slide_ext, out_dir, stem, pixel_size_um, fov_size_px,
-                               units, flip_y, align, x_off, y_off,
+                               slide_ext, slide_rast, out_dir, stem, pixel_size_um,
+                               fov_size_px, units, flip_y, align, x_off, y_off,
                                border_value, border_label) {
   factor <- if (units == "mm") 1000 / pixel_size_um else 1
   vects <- list()
@@ -616,15 +643,19 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
     y <- (if (isTRUE(flip_y)) -1 else 1) * (d$y * factor)
     e <- slide_ext[[s]]                                   # xmin,xmax,ymin,ymax
     # Diagnostic: raw coords, then units+flip (i.e. what align="none" with zero
-    # offsets produces), against the image/FOV extent. If the units+flip span
-    # already lines up with the image span, align="none" is exact; any constant
-    # gap is the offset to put in poly_x_offset_px / poly_y_offset_px.
+    # offsets produces), against the image/FOV extent.
     message(sprintf(
       "  [%s] raw x[%.4g, %.4g] y[%.4g, %.4g] | units+flip x[%.0f, %.0f] y[%.0f, %.0f] | image x[%.0f, %.0f] y[%.0f, %.0f]",
       s, min(d$x), max(d$x), min(d$y), max(d$y),
       min(x), max(x), min(y), max(y), e[1], e[2], e[3], e[4]))
     if (align == "none") {
-      x <- x + x_off; y <- y + y_off
+      xo <- if (!is.null(names(x_off)) && s %in% names(x_off)) x_off[[s]] else x_off[[1]]
+      yo <- if (!is.null(names(y_off)) && s %in% names(y_off)) y_off[[s]] else y_off[[1]]
+      x <- x + xo; y <- y + yo
+    } else if (align == "register") {
+      sh <- .gb_register_shift(slide_rast[[s]], x, y)
+      x <- x + sh[1]; y <- y + sh[2]
+      message(sprintf("  [%s] auto-registered to image: dx=%.0f dy=%.0f px", s, sh[1], sh[2]))
     } else if (length(x)) {
       pxmin <- min(x); pxmax <- max(x); pymin <- min(y); pymax <- max(y)
       pcx <- (pxmin + pxmax) / 2; pcy <- (pymin + pymax) / 2
@@ -786,7 +817,9 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   added after unit conversion/flip, used only when \code{poly_align = "none"}.
 #'   Both default to \code{0} (exact when the polygon coordinates share the FOV
 #'   positions' global frame). If the diagnostic shows a constant gap between the
-#'   units+flip span and the image span, set these to that gap.
+#'   units+flip span and the image span, set these to that gap. Each may also be
+#'   a named vector (names = slide names) to give a different offset per slide,
+#'   e.g. \code{poly_x_offset_px = c(MNCharu = -656, TA648 = -160)}.
 #' @param poly_border_value,poly_border_label Integer burned into the \code{.tif}
 #'   for cell borders and its CSV label. Defaults \code{9999999} and
 #'   \code{"Cell Border"}.
@@ -1218,9 +1251,10 @@ stitch_fovs_to_ometiff <- function(fov_positions,
       slide_ext <- stats::setNames(
         lapply(seq_len(n_slides), function(k) as.vector(terra::ext(if_list[[k]]))),
         slide_names)
+      slide_rast <- stats::setNames(if_list, slide_names)
       written <- c(written, .gb_write_polygons(
         poly_data$verts, poly_data$state_map, merged_if, slide_names, shifts,
-        slide_ext, out_dir, combine_name, pixel_size_um, fov_size_px,
+        slide_ext, slide_rast, out_dir, combine_name, pixel_size_um, fov_size_px,
         poly_coord_units, poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
         poly_border_value, poly_border_label))
       if (isTRUE(keep_intermediate)) {
@@ -1230,6 +1264,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
             poly_data$verts, poly_data$state_map, if_list[[k]], s,
             stats::setNames(list(c(0, 0)), s),
             stats::setNames(list(as.vector(terra::ext(if_list[[k]]))), s),
+            stats::setNames(list(if_list[[k]]), s),
             out_dir, s, pixel_size_um, fov_size_px, poly_coord_units,
             poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
             poly_border_value, poly_border_label))
@@ -1254,6 +1289,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
         poly_data$verts, poly_data$state_map, if_list[[s]], stem,
         stats::setNames(list(c(0, 0)), stem),
         stats::setNames(list(as.vector(terra::ext(if_list[[s]]))), stem),
+        stats::setNames(list(if_list[[s]]), stem),
         out_dir, stem, pixel_size_um, fov_size_px, poly_coord_units,
         poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
         poly_border_value, poly_border_label))
