@@ -147,16 +147,31 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 
 # Preflight for backend = "rbioformats": verify RBioFormats, rJava, and a
 # working JVM are all present, and fail upfront (before any stitching) if not.
-.gb_check_rbioformats <- function() {
-  if (!requireNamespace("RBioFormats", quietly = TRUE))
+# Critically, the JVM max heap (-Xmx) must be set BEFORE the JVM starts and
+# cannot be changed afterwards, so this: (1) checks packages are installed
+# WITHOUT loading RBioFormats (which would boot the JVM with a small default
+# heap), (2) sets java.parameters -Xmx, then (3) starts the JVM and loads
+# RBioFormats.
+.gb_check_rbioformats <- function(java_heap = NULL) {
+  if (!nzchar(system.file(package = "RBioFormats")))
     stop("backend = 'rbioformats' requires the 'RBioFormats' package, which is ",
          "not installed. Install it from Bioconductor with ",
          "BiocManager::install('RBioFormats'), or use backend = 'bftools'.",
          call. = FALSE)
-  if (!requireNamespace("rJava", quietly = TRUE))
+  if (!nzchar(system.file(package = "rJava")))
     stop("backend = 'rbioformats' needs Java via the 'rJava' package, which is ",
          "not installed. Install a Java runtime and install.packages('rJava'), ",
          "or use backend = 'bftools'.", call. = FALSE)
+
+  # Set the JVM max heap before the JVM boots (only if the user has not already
+  # specified -Xmx). This must happen before rJava/RBioFormats start Java.
+  heap_mb <- .gb_java_heap_mb(java_heap)
+  jp <- getOption("java.parameters")
+  if (is.null(jp) || !any(grepl("-Xmx", jp)))
+    options(java.parameters = c(jp, paste0("-Xmx", heap_mb, "m")))
+
+  if (!requireNamespace("rJava", quietly = TRUE))
+    stop("Failed to load 'rJava'. Use backend = 'bftools'.", call. = FALSE)
   jvm_ok <- tryCatch({ rJava::.jinit(); TRUE },
                      error = function(e) FALSE, warning = function(w) FALSE)
   if (!jvm_ok)
@@ -167,7 +182,55 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
                        error = function(e) FALSE)))
     stop("'RBioFormats' is installed but failed to load (usually a Java/",
          "Bio-Formats problem). Use backend = 'bftools'.", call. = FALSE)
-  invisible(TRUE)
+
+  # Report the heap the JVM actually got; if far below what we asked for, the
+  # JVM was already running and our setting was ignored -> tell the user.
+  actual_mb <- tryCatch({
+    rt <- rJava::.jcall("java/lang/Runtime", "Ljava/lang/Runtime;", "getRuntime")
+    rJava::.jcall(rt, "J", "maxMemory") / 1024^2
+  }, error = function(e) NA_real_)
+  if (is.finite(actual_mb)) {
+    message(sprintf("  Java max heap ~%.0f MB (requested %d MB).", actual_mb, heap_mb))
+    if (actual_mb < 0.8 * heap_mb)
+      warning("The JVM was already running, so the larger heap could not be ",
+              "applied. If RBioFormats runs out of Java heap, restart R and put ",
+              "options(java.parameters = \"-Xmx", heap_mb, "m\") at the very top ",
+              "of your script, before loading ANY package -- or use ",
+              "backend = 'bftools'.", call. = FALSE)
+  }
+  invisible(actual_mb)
+}
+
+# Total physical RAM in MB (NA if it cannot be determined).
+.gb_system_ram_mb <- function() {
+  os <- Sys.info()[["sysname"]]
+  tryCatch({
+    if (identical(os, "Darwin")) {
+      as.numeric(system2("sysctl", c("-n", "hw.memsize"), stdout = TRUE)) / 1024^2
+    } else if (identical(os, "Linux")) {
+      ln <- grep("MemTotal", readLines("/proc/meminfo"), value = TRUE)
+      as.numeric(sub(".*?([0-9]+) kB.*", "\\1", ln)) / 1024
+    } else if (identical(os, "Windows")) {
+      out <- suppressWarnings(system2("wmic",
+        c("computersystem", "get", "TotalPhysicalMemory"), stdout = TRUE))
+      as.numeric(gsub("\\D", "", paste(out, collapse = ""))) / 1024^2
+    } else NA_real_
+  }, error = function(e) NA_real_)
+}
+
+# Resolve the requested JVM heap to MB. Accepts numeric MB, "24g"/"18000m"
+# strings, or NULL (auto: ~70% of RAM, 8 GB fallback).
+.gb_java_heap_mb <- function(java_heap) {
+  if (!is.null(java_heap)) {
+    if (is.numeric(java_heap)) return(max(512L, as.integer(java_heap)))
+    val  <- as.numeric(regmatches(java_heap, regexpr("[0-9.]+", java_heap)))
+    unit <- tolower(gsub("[0-9. ]", "", java_heap))
+    mb <- switch(unit, g = , gb = val * 1024, k = , kb = val / 1024, val) # default MB
+    return(max(512L, as.integer(mb)))
+  }
+  ram <- .gb_system_ram_mb()
+  if (is.na(ram)) return(8192L)
+  as.integer(max(2048, floor(ram * 0.7)))
 }
 
 # Estimate peak RAM (GB) to materialise an in-memory copy of a raster for
@@ -397,6 +460,12 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   (or \code{Inf} to remove it). \code{NULL} (default) auto-raises the cap to
 #'   the estimated need when the current cap is lower; the previous value is
 #'   restored afterwards. Raising the cap only helps if physical RAM allows it.
+#' @param java_heap Only used by \code{backend = "rbioformats"}: the JVM maximum
+#'   heap (\code{-Xmx}) as MB (numeric) or a string like \code{"24g"}/
+#'   \code{"18000m"}. \code{NULL} (default) uses ~70\% of system RAM. This is
+#'   applied only if the JVM has not already started in the session and you have
+#'   not set \code{options(java.parameters)} yourself; otherwise set that option
+#'   before loading any package. The JVM heap cannot be resized once started.
 #' @param overwrite Overwrite existing outputs. Default \code{TRUE}.
 #'
 #' @return (Invisibly) a character vector of the OME-TIFF paths written.
@@ -443,6 +512,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    backend            = c("bftools", "rbioformats"),
                                    bftools_dir        = NULL,
                                    max_vsize          = NULL,
+                                   java_heap          = NULL,
                                    keep_intermediate  = FALSE,
                                    overwrite          = TRUE) {
 
@@ -495,7 +565,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   }
   # If the IF backend is rbioformats, make sure it can actually run before we
   # spend time stitching.
-  if (backend == "rbioformats") .gb_check_rbioformats()
+  if (backend == "rbioformats") .gb_check_rbioformats(java_heap)
 
   # ---- helper: write an IF SpatRaster to a Minerva OME-TIFF -----------------
   write_if_ome <- function(rast, stem, eff_um, channels_df) {
@@ -690,6 +760,8 @@ if (sys.nframe() == 0) {
       help = "Directory with bfconvert/tiffcomment (else PATH)."),
     optparse::make_option(c("--max_vsize"), type = "double", default = NULL,
       help = "rbioformats/macOS only: R vector-memory limit in MB (mem.maxVSize)."),
+    optparse::make_option(c("--java_heap"), type = "character", default = NULL,
+      help = "rbioformats only: JVM max heap, e.g. '24g' or '18000m' (default ~70%% RAM)."),
     optparse::make_option(c("-k", "--keep_intermediate"), action = "store_true", default = FALSE,
       help = "Keep intermediate .tif/.xml [default= %default]"),
     optparse::make_option(c("--no_overwrite"), action = "store_true", default = FALSE,
@@ -726,6 +798,7 @@ if (sys.nframe() == 0) {
     backend            = opt$backend,
     bftools_dir        = opt$bftools_dir,
     max_vsize          = opt$max_vsize,
+    java_heap          = opt$java_heap,
     keep_intermediate  = opt$keep_intermediate,
     overwrite          = !opt$no_overwrite
   )
