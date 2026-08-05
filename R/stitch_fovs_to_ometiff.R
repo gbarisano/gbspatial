@@ -615,6 +615,14 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
     x <- d$x * factor
     y <- (if (isTRUE(flip_y)) -1 else 1) * (d$y * factor)
     e <- slide_ext[[s]]                                   # xmin,xmax,ymin,ymax
+    # Diagnostic: raw coords, then units+flip (i.e. what align="none" with zero
+    # offsets produces), against the image/FOV extent. If the units+flip span
+    # already lines up with the image span, align="none" is exact; any constant
+    # gap is the offset to put in poly_x_offset_px / poly_y_offset_px.
+    message(sprintf(
+      "  [%s] raw x[%.4g, %.4g] y[%.4g, %.4g] | units+flip x[%.0f, %.0f] y[%.0f, %.0f] | image x[%.0f, %.0f] y[%.0f, %.0f]",
+      s, min(d$x), max(d$x), min(d$y), max(d$y),
+      min(x), max(x), min(y), max(y), e[1], e[2], e[3], e[4]))
     if (align == "none") {
       x <- x + x_off; y <- y + y_off
     } else if (length(x)) {
@@ -628,10 +636,9 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
       } else {                                            # center (keep scale)
         x <- x - pcx + rcx; y <- y - pcy + rcy
       }
+      message(sprintf("  [%s] align='%s' -> x[%.0f, %.0f] y[%.0f, %.0f]",
+                      s, align, min(x), max(x), min(y), max(y)))
     }
-    message(sprintf(
-      "  [%s] polygons span x[%.0f, %.0f] y[%.0f, %.0f]; image x[%.0f, %.0f] y[%.0f, %.0f]",
-      s, min(x), max(x), min(y), max(y), e[1], e[2], e[3], e[4]))
     sh <- shifts[[s]]; if (is.null(sh)) sh <- c(0, 0)
     v <- .gb_build_poly_vect(data.frame(poly_id = d$poly_id,
                                         x = round(x + sh[1]), y = round(y + sh[2])))
@@ -762,22 +769,24 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   \code{"y_slide_mm"}.
 #' @param poly_coord_units Units of the polygon x/y: \code{"mm"} (default,
 #'   converted with \code{1000 / pixel_size_um}) or \code{"px"}.
-#' @param poly_flip_y Logical; negate y to match the raster's flipped frame.
-#'   Default \code{TRUE}.
+#' @param poly_flip_y Logical; negate y to match the raster's flipped frame
+#'   (the raster uses \code{-y_global}). Default \code{TRUE}. If your polygon y
+#'   is already negative (e.g. Seurat has pre-flipped it), set \code{FALSE}.
 #' @param poly_align How to place each slide's polygons onto its image:
-#'   \code{"center"} (default) keeps the unit scale but translates so the
-#'   polygon bounding-box centre matches the image centre; \code{"bbox"} scales
-#'   and translates the polygon bounding box to fill the image extent (use only
-#'   if the unit scale is unknown, as it can distort); \code{"none"} applies only
-#'   the manual \code{poly_x_offset_px}/\code{poly_y_offset_px}. \code{"center"}
-#'   is robust across coordinate sources (e.g. Seurat segmentation coordinates,
-#'   whose origin often differs from the FOV positions), which is why it is the
-#'   default; a per-slide diagnostic line prints the polygon and image spans so
-#'   you can confirm the overlay.
+#'   \code{"none"} (default) applies only unit conversion, the y-flip, and the
+#'   manual \code{poly_x_offset_px}/\code{poly_y_offset_px} -- i.e. it assumes
+#'   the polygon coordinates live in the same global frame as the FOV positions
+#'   (top-left-corner origin), which for CosMx gives an exact overlay with zero
+#'   offsets; \code{"center"} translates the polygon bounding-box centre to the
+#'   image centre (approximate: only exact if the tissue is centred in the FOV
+#'   grid); \code{"bbox"} scales and translates the bounding box to fill the
+#'   image extent (can distort). A per-slide diagnostic prints the raw span, the
+#'   units+flip span, and the image span so you can read off any residual offset.
 #' @param poly_x_offset_px,poly_y_offset_px Constant offsets (in original px)
 #'   added after unit conversion/flip, used only when \code{poly_align = "none"}.
-#'   Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
-#'   resolves to \code{-fov_size_px}).
+#'   Both default to \code{0} (exact when the polygon coordinates share the FOV
+#'   positions' global frame). If the diagnostic shows a constant gap between the
+#'   units+flip span and the image span, set these to that gap.
 #' @param poly_border_value,poly_border_label Integer burned into the \code{.tif}
 #'   for cell borders and its CSV label. Defaults \code{9999999} and
 #'   \code{"Cell Border"}.
@@ -863,9 +872,9 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    poly_y_col         = "y_slide_mm",
                                    poly_coord_units   = c("mm", "px"),
                                    poly_flip_y        = TRUE,
-                                   poly_align         = c("center", "bbox", "none"),
+                                   poly_align         = c("none", "center", "bbox"),
                                    poly_x_offset_px   = 0,
-                                   poly_y_offset_px   = NULL,
+                                   poly_y_offset_px   = 0,
                                    poly_border_value  = 9999999L,
                                    poly_border_label  = "Cell Border",
                                    backend            = c("bftools", "rbioformats"),
@@ -1000,7 +1009,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   # ---- polygon preflight (validate/load before any stitching) ---------------
   do_polygons <- FALSE
   poly_data <- NULL
-  poly_y_off <- if (is.null(poly_y_offset_px)) -fov_size_px else poly_y_offset_px
+  poly_y_off <- if (is.null(poly_y_offset_px)) 0 else poly_y_offset_px
   if (isTRUE(generate_polygons)) {
     if (is.null(polygons)) {
       message("generate_polygons = TRUE but no 'polygons' supplied; skipping ",
@@ -1322,8 +1331,8 @@ if (sys.nframe() == 0) {
       help = "y column in the polygon table [default= %default]"),
     optparse::make_option(c("--poly_coord_units"), type = "character", default = "mm",
       help = "'mm' or 'px' for polygon coordinates [default= %default]"),
-    optparse::make_option(c("--poly_align"), type = "character", default = "center",
-      help = "Polygon-to-image alignment: 'center', 'bbox', or 'none' [default= %default]"),
+    optparse::make_option(c("--poly_align"), type = "character", default = "none",
+      help = "Polygon-to-image alignment: 'none', 'center', or 'bbox' [default= %default]"),
     optparse::make_option(c("-k", "--keep_intermediate"), action = "store_true", default = FALSE,
       help = "Keep intermediate .tif/.xml (and per-slide polygons) [default= %default]"),
     optparse::make_option(c("--no_overwrite"), action = "store_true", default = FALSE,
