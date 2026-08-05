@@ -408,8 +408,22 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 
 # Extract one polygon input (Seurat object or data.frame) into a long table with
 # columns cell, x, y (one row per polygon vertex), slide, State.
+#   force_slide    : if not NA, assign every row to this slide (positional
+#                    per-slide input) and ignore any slide column.
+#   fallback_slide : slide to use only when there is no slide column (single
+#                    combined input covering one slide).
+# Otherwise the slide is read per-cell/row from `slide_col`.
 .gb_extract_polys_one <- function(obj, state_col, slide_col, cell_col,
-                                  x_col, y_col, default_slide) {
+                                  x_col, y_col, force_slide, fallback_slide) {
+  assign_slide <- function(col_vals, n) {
+    if (!is.na(force_slide)) return(rep(force_slide, n))
+    if (!is.null(col_vals))  return(as.character(col_vals))
+    if (!is.na(fallback_slide)) return(rep(fallback_slide, n))
+    stop("Could not determine each cell's slide: the slide column '", slide_col,
+         "' (poly_slide_col) was not found, and there is no per-slide input to ",
+         "fall back on. Set 'poly_slide_col' to the correct column, or pass one ",
+         "polygon input per slide.", call. = FALSE)
+  }
   if (inherits(obj, "Seurat")) {
     if (!requireNamespace("SeuratObject", quietly = TRUE) &&
         !requireNamespace("Seurat", quietly = TRUE))
@@ -420,10 +434,6 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
       stop("state_col '", state_col, "' is not a column of the Seurat ",
            "meta.data. Available (first 20): ",
            paste(utils::head(names(md), 20), collapse = ", "), call. = FALSE)
-    if (is.na(default_slide) && !(slide_col %in% names(md)))
-      stop("poly_slide_col '", slide_col, "' is not in the Seurat meta.data, ",
-           "and a single combined object was supplied. Set 'poly_slide_col' or ",
-           "pass one object per slide.", call. = FALSE)
     md$.cell <- rownames(md)
     getimg <- if (requireNamespace("SeuratObject", quietly = TRUE)) SeuratObject::Images else Seurat::Images
     getcoord <- if (requireNamespace("SeuratObject", quietly = TRUE)) SeuratObject::GetTissueCoordinates else Seurat::GetTissueCoordinates
@@ -452,8 +462,9 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
            " (need x, y, cell).", call. = FALSE)
     out <- data.frame(cell = as.character(cd[[cc]]), x = cd[[cx]], y = cd[[cy]],
                       stringsAsFactors = FALSE)
-    out$slide <- if (!is.na(default_slide)) default_slide
-                 else md[[slide_col]][match(out$cell, md$.cell)]
+    col_vals <- if (slide_col %in% names(md))
+      md[[slide_col]][match(out$cell, md$.cell)] else NULL
+    out$slide <- assign_slide(col_vals, nrow(out))
     out$State <- md[[state_col]][match(out$cell, md$.cell)]
     return(out[!is.na(out$State), , drop = FALSE])
   }
@@ -464,16 +475,11 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
       stop("Polygon table is missing column(s): ", paste(miss, collapse = ", "),
            ". Available (first 30): ", paste(utils::head(names(obj), 30), collapse = ", "),
            ". Set poly_cell_col / poly_x_col / poly_y_col / state_col.", call. = FALSE)
-    slide <- if (!is.na(default_slide)) rep(default_slide, nrow(obj)) else {
-      if (!(slide_col %in% names(obj)))
-        stop("Polygon table needs a slide column '", slide_col,
-             "' (poly_slide_col), or pass one table per slide.", call. = FALSE)
-      as.character(obj[[slide_col]])
-    }
+    col_vals <- if (slide_col %in% names(obj)) obj[[slide_col]] else NULL
     return(data.frame(cell = as.character(obj[[cell_col]]),
                       x = obj[[x_col]], y = obj[[y_col]],
-                      slide = slide, State = obj[[state_col]],
-                      stringsAsFactors = FALSE))
+                      slide = assign_slide(col_vals, nrow(obj)),
+                      State = obj[[state_col]], stringsAsFactors = FALSE))
   }
   stop("Each 'polygons' input must be a Seurat object or a data.frame (or an ",
        "RDS path to one).", call. = FALSE)
@@ -506,9 +512,20 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 
   long <- vector("list", n_in)
   for (i in seq_len(n_in)) {
-    default_slide <- if (n_in == n_slides) slide_names[i] else NA_character_
+    if (n_in == 1L) {
+      # One combined input: split by the slide column and keep only the slides
+      # being processed. If there is a single slide and no slide column, treat
+      # the whole input as that slide.
+      force_slide    <- NA_character_
+      fallback_slide <- if (n_slides == 1L) slide_names[1] else NA_character_
+    } else {
+      # One input per slide: assign positionally (input i -> slide_names[i]).
+      force_slide    <- slide_names[i]
+      fallback_slide <- NA_character_
+    }
     long[[i]] <- .gb_extract_polys_one(inputs[[i]], state_col, slide_col,
-                                       cell_col, x_col, y_col, default_slide)
+                                       cell_col, x_col, y_col,
+                                       force_slide, fallback_slide)
   }
   df <- do.call(rbind, long)
   df <- df[!is.na(df$slide), , drop = FALSE]
@@ -636,8 +653,11 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #' @param image_dir Morphology2D directory (or list/vector, one per slide, or a
 #'   single directory reused for all slides).
 #' @param out_dir Output directory (created if needed).
-#' @param slide_names Optional slide names (output stems). Defaults to the names
-#'   of \code{fov_positions} or \code{slide1..N}.
+#' @param slide_names Optional slide names (also the output stems). If omitted,
+#'   taken from the names of \code{fov_positions} when it is a named list,
+#'   otherwise derived from the folder containing each positions file (the CosMx
+#'   per-slide flatFiles folder, usually equal to \code{Run_Tissue_name}), so
+#'   they line up with the polygon slide column; falls back to \code{slide1..N}.
 #' @param fov_size_px FOV edge length in pixels. Default \code{4256}.
 #' @param downsample_factor Per-FOV block-mean downsampling (>=1). Default \code{8}.
 #' @param pixel_size_um Original pixel size in microns. Default \code{0.120280945}.
@@ -680,9 +700,12 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #' @param state_col Column holding the Minerva State (e.g. a cluster/cell-type
 #'   column) in the Seurat \code{meta.data} or the polygon table. Required when
 #'   generating polygons.
-#' @param poly_slide_col Slide-identifier column used to split a combined input
-#'   by slide; its values must match \code{slide_names}. Default
-#'   \code{"Run_Tissue_name"}.
+#' @param poly_slide_col Slide-identifier column in a combined input, used to
+#'   assign each cell to a slide and keep only the slide(s) being processed (so a
+#'   multi-slide Seurat object run on one slide contributes only that slide's
+#'   cells); its values must match \code{slide_names}. When you instead pass one
+#'   input per slide, cells are assigned positionally and this column is ignored.
+#'   Default \code{"Run_Tissue_name"}.
 #' @param poly_cell_col,poly_x_col,poly_y_col For table input: the cell-id, x and
 #'   y column names. Defaults \code{"cell_ID"}, \code{"x_slide_mm"},
 #'   \code{"y_slide_mm"}.
@@ -820,7 +843,27 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     if (length(slide_names) != n_slides) stop("'slide_names' must match the number of slides.")
   } else if (!is.null(names(fov_positions)) && all(nzchar(names(fov_positions)))) {
     slide_names <- names(fov_positions)
-  } else slide_names <- paste0("slide", seq_len(n_slides))
+  } else {
+    # Default: name each slide after the folder containing its positions file
+    # (the CosMx per-slide flatFiles folder, usually == Run_Tissue_name), so it
+    # matches the slide column of a Seurat object / polygon table. Falls back to
+    # slide1..N for non-path inputs or if the folder names are not usable.
+    slide_names <- vapply(seq_len(n_slides), function(s) {
+      p <- fov_positions[[s]]
+      nm <- if (is.character(p)) basename(dirname(p)) else NA_character_
+      if (is.na(nm) || !nzchar(nm) || nm %in% c(".", "/")) paste0("slide", s) else nm
+    }, character(1))
+    if (anyDuplicated(slide_names)) {
+      message("Derived slide names are not unique (", paste(slide_names, collapse = ", "),
+              "); falling back to slide1..", n_slides,
+              ". Set 'slide_names' to control them.")
+      slide_names <- paste0("slide", seq_len(n_slides))
+    } else {
+      message("Using slide name(s) from positions-file folder(s): ",
+              paste(slide_names, collapse = ", "),
+              " (override with 'slide_names').")
+    }
+  }
 
   if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
