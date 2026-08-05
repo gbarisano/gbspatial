@@ -579,11 +579,17 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
                                 filename = tmp_fill, overwrite = TRUE)
   borders <- terra::as.lines(master)
   borders$ub <- border_value
+  tmp_upd <- tempfile(tmpdir = out_dir, fileext = ".tif")
+  final_mask <- terra::rasterize(borders, base_mask, field = "ub", update = TRUE,
+                                 filename = tmp_upd, overwrite = TRUE)
+  # Dedicated integer write: rasterize(update=TRUE) inherits the base mask's
+  # float type and ignores 'datatype', which yields a float32 TIFF that Minerva
+  # cannot convert. writeRaster() with datatype = "INT4U" forces an unsigned
+  # 32-bit integer TIFF.
   poly_tif <- file.path(out_dir, paste0(stem, "_polygons.tif"))
-  terra::rasterize(borders, base_mask, field = "ub", update = TRUE,
-                   filename = poly_tif, datatype = "INT4U", overwrite = TRUE,
-                   wopt = list(gdal = c("COMPRESS=LZW", "BIGTIFF=YES")))
-  unlink(tmp_fill)
+  terra::writeRaster(final_mask, poly_tif, datatype = "INT4U", overwrite = TRUE,
+                     wopt = list(gdal = c("COMPRESS=LZW", "BIGTIFF=YES")))
+  unlink(c(tmp_fill, tmp_upd))
 
   cs <- state_map[order(state_map$poly_id), , drop = FALSE]
   cs <- data.frame(CellID = cs$poly_id, State = cs$State, stringsAsFactors = FALSE)
