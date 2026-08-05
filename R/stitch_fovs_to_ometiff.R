@@ -358,11 +358,21 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   rl <- vector("list", n_tiles)
   pb <- utils::txtProgressBar(min = 0, max = n_tiles, style = 3)
   for (i in seq_len(n_tiles)) {
-    r <- terra::rast(unname(imgmap[i]))
+    # Morphology TIFFs carry no extent; terra would warn "unknown extent" before
+    # we set it, so silence just this read.
+    r <- suppressWarnings(terra::rast(unname(imgmap[i])))
     if (downsample_factor > 1L)
       r <- terra::aggregate(r, fact = downsample_factor, fun = "mean")
     x0 <- tiles$x_px[i]; y0 <- tiles$y_px[i]
-    terra::ext(r) <- c(x0, x0 + fov_size_px, -(y0 + fov_size_px), -y0)
+    # Place the FOV at its global position, but snap the origin onto a common
+    # lattice at the effective resolution so every tile shares geometry and
+    # terra::merge() does not have to resample (faster; avoids the
+    # "did not share the base geometry" warning). The snap is < half a
+    # downsampled pixel and does not visibly move the tile.
+    res_px <- fov_size_px / terra::ncol(r)          # original px per cell
+    xmin <-  round(x0 / res_px) * res_px
+    ymax <- -round(y0 / res_px) * res_px
+    terra::ext(r) <- c(xmin, xmin + fov_size_px, ymax - fov_size_px, ymax)
     rl[[i]] <- r; utils::setTxtProgressBar(pb, i)
   }
   close(pb)
@@ -978,43 +988,66 @@ stitch_fovs_to_ometiff <- function(fov_positions,
       if (!identical(st, 0L)) stop("bfconvert failed for ", basename(ome_tif), ".")
     } else {                                   # rbioformats
       # RBioFormats has no streaming writer: the whole image must fit in RAM as
-      # a double array (plus a transpose copy). Estimate the peak and lift
-      # macOS's mem.maxVSize cap when possible; for large mosaics use bftools.
+      # a double array plus a transpose copy (~2.5x the raw pixel bytes). If that
+      # would not fit in physical RAM, stream with bfconvert when available,
+      # otherwise stop early with a clear message (no point running out of RAM).
       peak_gb <- .gb_rbf_peak_gb(rast)
-      message(sprintf(
-        "  RBioFormats loads the full image into RAM: ~%.1f GB peak (%.0f Mpx x %d ch). ",
-        peak_gb, terra::ncell(rast) / 1e6, terra::nlyr(rast)),
-        "For large mosaics, backend = 'bftools' streams to disk and avoids this.")
-      old_vsize <- .gb_raise_vsize(peak_gb * 1024, max_vsize)
-      if (is.finite(old_vsize)) on.exit(try(mem.maxVSize(old_vsize), silent = TRUE), add = TRUE)
+      ram_gb  <- .gb_system_ram_mb() / 1024
+      fits    <- !is.finite(ram_gb) || peak_gb <= 0.8 * ram_gb
+      if (!fits) {
+        bf <- if (nzchar(bfconvert)) bfconvert else .gb_find_bftool("bfconvert", bftools_dir)
+        if (nzchar(bf)) {
+          message(sprintf(
+            "  image needs ~%.1f GB in RAM but the system has ~%.0f GB; ",
+            peak_gb, ram_gb),
+            "streaming with bfconvert instead of RBioFormats for this image.")
+          st <- system2(bf, c("-overwrite", shQuote(path.expand(plain)),
+                              shQuote(path.expand(ome_tif))),
+                        stdout = FALSE, stderr = FALSE)
+          if (!identical(st, 0L)) stop("bfconvert failed for ", basename(ome_tif), ".")
+        } else {
+          stop(sprintf(paste0(
+            "This image needs ~%.1f GB of RAM to write with backend = ",
+            "'rbioformats', but the system has ~%.0f GB, and RBioFormats cannot ",
+            "stream to disk. Either (1) use backend = 'bftools' (streams to ",
+            "disk; set bftools_dir = \"/Applications/bftools\" if bftools is not ",
+            "on your PATH), or (2) downsample more (increase downsample_factor ",
+            "and/or combine_downsample)."), peak_gb, ram_gb), call. = FALSE)
+        }
+      } else {
+        message(sprintf(
+          "  RBioFormats loads the full image into RAM: ~%.1f GB peak (%.0f Mpx x %d ch).",
+          peak_gb, terra::ncell(rast) / 1e6, terra::nlyr(rast)))
+        old_vsize <- .gb_raise_vsize(peak_gb * 1024, max_vsize)
+        if (is.finite(old_vsize)) on.exit(try(mem.maxVSize(old_vsize), silent = TRUE), add = TRUE)
 
-      arr <- terra::as.array(rast)             # [row, col, band]
-      arr <- aperm(arr, c(2, 1, 3))            # -> [col, row, band]
-      rbf_fail <- function(e) {
-        msg <- conditionMessage(e)
-        if (grepl("memory|vsize|heap|OutOfMemory", msg, ignore.case = TRUE))
-          stop("RBioFormats ran out of memory (~", sprintf("%.1f", peak_gb),
-               " GB needed). Use backend = 'bftools' (streams to disk), ",
-               "increase 'max_vsize'/'java_heap', or downsample more. Original: ",
-               msg, call. = FALSE)
-        stop("RBioFormats::write.image failed (", msg,
-             "); use backend = 'bftools'.", call. = FALSE)
+        arr <- terra::as.array(rast)             # [row, col, band]
+        arr <- aperm(arr, c(2, 1, 3))            # -> [col, row, band]
+        rbf_fail <- function(e) {
+          msg <- conditionMessage(e)
+          if (grepl("memory|vsize|heap|OutOfMemory", msg, ignore.case = TRUE))
+            stop("RBioFormats ran out of memory (~", sprintf("%.1f", peak_gb),
+                 " GB needed). Use backend = 'bftools' (streams to disk), or ",
+                 "downsample more. Original: ", msg, call. = FALSE)
+          stop("RBioFormats::write.image failed (", msg,
+               "); use backend = 'bftools'.", call. = FALSE)
+        }
+        # Prefer little-endian (to match bftools); fall back if the installed
+        # API does not accept the argument.
+        message("  RBioFormats -> ", basename(ome_tif))
+        tryCatch(
+          RBioFormats::write.image(arr, file = path.expand(ome_tif),
+                                   force = overwrite, pixelType = "uint16",
+                                   littleEndian = TRUE),
+          error = function(e) {
+            if (grepl("unused argument|littleEndian", conditionMessage(e)))
+              tryCatch(RBioFormats::write.image(arr, file = path.expand(ome_tif),
+                                                force = overwrite, pixelType = "uint16"),
+                       error = rbf_fail)
+            else rbf_fail(e)
+          })
+        rm(arr); gc(verbose = FALSE)
       }
-      # Prefer little-endian (to match the bftools output); fall back if the
-      # installed API does not accept the argument.
-      message("  RBioFormats -> ", basename(ome_tif))
-      tryCatch(
-        RBioFormats::write.image(arr, file = path.expand(ome_tif),
-                                 force = overwrite, pixelType = "uint16",
-                                 littleEndian = TRUE),
-        error = function(e) {
-          if (grepl("unused argument|littleEndian", conditionMessage(e)))
-            tryCatch(RBioFormats::write.image(arr, file = path.expand(ome_tif),
-                                              force = overwrite, pixelType = "uint16"),
-                     error = rbf_fail)
-          else rbf_fail(e)
-        })
-      rm(arr); gc(verbose = FALSE)
     }
 
     # Inject identical, structure-matching OME-XML (endianness detected from the
