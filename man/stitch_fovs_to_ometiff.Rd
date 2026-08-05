@@ -24,6 +24,7 @@ stitch_fovs_to_ometiff(
   backend = c("bftools", "rbioformats"),
   bftools_dir = NULL,
   max_vsize = NULL,
+  java_heap = NULL,
   keep_intermediate = FALSE,
   overwrite = TRUE
 )
@@ -92,6 +93,13 @@ vector-memory limit in MB to set via \code{\link[base]{mem.maxVSize}}
 (or \code{Inf} to remove it). \code{NULL} (default) auto-raises the cap to
 the estimated need when the current cap is lower; the previous value is
 restored afterwards. Raising the cap only helps if physical RAM allows it.}
+
+\item{java_heap}{Only used by \code{backend = "rbioformats"}: the JVM maximum
+heap (\code{-Xmx}) as MB (numeric) or a string like \code{"24g"}/
+\code{"18000m"}. \code{NULL} (default) uses ~70\\% of system RAM. This is
+applied only if the JVM has not already started in the session and you have
+not set \code{options(java.parameters)} yourself; otherwise set that option
+before loading any package. The JVM heap cannot be resized once started.}
 
 \item{keep_intermediate}{Keep intermediate plain \code{.tif}/\code{.xml}.
 Default \code{FALSE}.}
