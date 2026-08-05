@@ -358,21 +358,11 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   rl <- vector("list", n_tiles)
   pb <- utils::txtProgressBar(min = 0, max = n_tiles, style = 3)
   for (i in seq_len(n_tiles)) {
-    # Morphology TIFFs carry no extent; terra would warn "unknown extent" before
-    # we set it, so silence just this read.
-    r <- suppressWarnings(terra::rast(unname(imgmap[i])))
+    r <- terra::rast(unname(imgmap[i]))
     if (downsample_factor > 1L)
       r <- terra::aggregate(r, fact = downsample_factor, fun = "mean")
     x0 <- tiles$x_px[i]; y0 <- tiles$y_px[i]
-    # Place the FOV at its global position, but snap the origin onto a common
-    # lattice at the effective resolution so every tile shares geometry and
-    # terra::merge() does not have to resample (faster; avoids the
-    # "did not share the base geometry" warning). The snap is < half a
-    # downsampled pixel and does not visibly move the tile.
-    res_px <- fov_size_px / terra::ncol(r)          # original px per cell
-    xmin <-  round(x0 / res_px) * res_px
-    ymax <- -round(y0 / res_px) * res_px
-    terra::ext(r) <- c(xmin, xmin + fov_size_px, ymax - fov_size_px, ymax)
+    terra::ext(r) <- c(x0, x0 + fov_size_px, -(y0 + fov_size_px), -y0)
     rl[[i]] <- r; utils::setTxtProgressBar(pb, i)
   }
   close(pb)
@@ -520,22 +510,6 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
     stop("Provide either 1 combined 'polygons' input or exactly ", n_slides,
          " (one per slide); got ", n_in, ".", call. = FALSE)
 
-  if (n_in == n_slides && n_slides > 1L) {
-    message("Polygons: ", n_in, " inputs for ", n_slides, " slides -> assigning ",
-            "each input to a slide by position (", paste(slide_names, collapse = ", "),
-            "); 'poly_slide_col' is not used in this mode.")
-    # Heads-up if the user set a slide column that isn't present anywhere (they
-    # may think it is being used to split slides).
-    present <- vapply(inputs, function(o) {
-      nm <- if (inherits(o, "Seurat")) names(o@meta.data) else if (is.data.frame(o)) names(o) else character(0)
-      slide_col %in% nm
-    }, logical(1))
-    if (!any(present) && !identical(slide_col, "Run_Tissue_name"))
-      warning("poly_slide_col = '", slide_col, "' was not found in any polygon ",
-              "input and is ignored here (slides are assigned by input order).",
-              call. = FALSE)
-  }
-
   long <- vector("list", n_in)
   for (i in seq_len(n_in)) {
     if (n_in == 1L) {
@@ -569,8 +543,6 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   df <- df[df$slide %in% slide_names, , drop = FALSE]
   if (!nrow(df)) stop("No polygon vertices remain after filtering to the ",
                       "requested slides.", call. = FALSE)
-  message("Polygons: ", nrow(df), " vertices; State column '", state_col,
-          "' has ", length(unique(df$State)), " distinct value(s).")
 
   # Global unique poly_id per (slide, cell), preserving vertex order.
   key <- paste(df$slide, df$cell, sep = "\r")
@@ -595,84 +567,23 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   v
 }
 
-# Estimate the (dx, dy) in world units to add to polygon coordinates (px, py) so
-# they line up with the tissue in `tissue` (a SpatRaster), via coarse FFT phase
-# correlation. Robust to the sparse cells-within-cores pattern because it
-# correlates occupancy grids. Returns c(0, 0) if it cannot lock on.
-.gb_register_shift <- function(tissue, px, py, ncoarse = 256L) {
-  e <- as.vector(terra::ext(tissue))                    # xmin,xmax,ymin,ymax
-  agg <- max(1L, as.integer(floor(min(terra::nrow(tissue), terra::ncol(tissue)) / ncoarse)))
-  tr <- if (agg > 1L) terra::aggregate(tissue[[1]], fact = agg, fun = "max") else tissue[[1]]
-  tb <- terra::as.matrix(tr, wide = TRUE); tb[is.na(tb)] <- 0
-  tb <- (tb > 0) * 1.0
-  nr <- nrow(tb); nc <- ncol(tb)
-  if (!nr || !nc || !any(tb > 0) || !length(px)) return(c(0, 0))
-  cx <- floor((px - e[1]) / (e[2] - e[1]) * nc) + 1L
-  ry <- floor((e[4] - py) / (e[4] - e[3]) * nr) + 1L    # world y high = top row
-  keep <- is.finite(cx) & is.finite(ry) & cx >= 1 & cx <= nc & ry >= 1 & ry <= nr
-  if (!any(keep)) return(c(0, 0))
-  pb <- matrix(0, nr, nc); pb[cbind(ry[keep], cx[keep])] <- 1
-  A <- stats::fft(tb); B <- stats::fft(pb)
-  R <- A * Conj(B); R <- R / (Mod(R) + 1e-9)
-  cc <- Re(stats::fft(R, inverse = TRUE)) / length(R)
-  mi <- which(cc == max(cc), arr.ind = TRUE)[1, ]
-  dr <- mi[1] - 1L; dc <- mi[2] - 1L
-  if (dr > nr / 2) dr <- dr - nr
-  if (dc > nc / 2) dc <- dc - nc
-  cellw <- (e[2] - e[1]) / nc; cellh <- (e[4] - e[3]) / nr
-  c(dc * cellw, -dr * cellh)                            # add to (px, py)
-}
-
-# shift onto the grid, then rasterize filled cells + borders onto `template` and
-# write <stem>_polygons.tif and _polygons.csv.
-#   slide_ext : named list slide -> c(xmin, xmax, ymin, ymax) of that slide's
-#               (pre-grid-shift) IF raster, used to align polygons to the image.
-#   slide_rast: named list slide -> that slide's IF SpatRaster (for "register").
-#   align     : "none" (manual x_off/y_off), "register" (auto FFT-align to the
-#               tissue), "center" (bbox-centre to image-centre) or "bbox".
+# Transform vertex coordinates (per slide), shift, rasterize filled cells +
+# borders onto `template`, and write <stem>_polygons.tif and _polygons.csv.
 .gb_write_polygons <- function(verts, state_map, template, slide_set, shifts,
-                               slide_ext, slide_rast, out_dir, stem, pixel_size_um,
-                               fov_size_px, units, flip_y, align, x_off, y_off,
-                               border_value, border_label) {
+                               out_dir, stem, pixel_size_um, fov_size_px,
+                               units, flip_y, x_off, y_off, border_value,
+                               border_label) {
   factor <- if (units == "mm") 1000 / pixel_size_um else 1
   vects <- list()
   for (s in slide_set) {
     d <- verts[[s]]
     if (is.null(d) || !nrow(d)) next
-    x <- d$x * factor
-    y <- (if (isTRUE(flip_y)) -1 else 1) * (d$y * factor)
-    e <- slide_ext[[s]]                                   # xmin,xmax,ymin,ymax
-    # Diagnostic: raw coords, then units+flip (i.e. what align="none" with zero
-    # offsets produces), against the image/FOV extent.
-    message(sprintf(
-      "  [%s] raw x[%.4g, %.4g] y[%.4g, %.4g] | units+flip x[%.0f, %.0f] y[%.0f, %.0f] | image x[%.0f, %.0f] y[%.0f, %.0f]",
-      s, min(d$x), max(d$x), min(d$y), max(d$y),
-      min(x), max(x), min(y), max(y), e[1], e[2], e[3], e[4]))
-    if (align == "none") {
-      xo <- if (!is.null(names(x_off)) && s %in% names(x_off)) x_off[[s]] else x_off[[1]]
-      yo <- if (!is.null(names(y_off)) && s %in% names(y_off)) y_off[[s]] else y_off[[1]]
-      x <- x + xo; y <- y + yo
-    } else if (align == "register") {
-      sh <- .gb_register_shift(slide_rast[[s]], x, y)
-      x <- x + sh[1]; y <- y + sh[2]
-      message(sprintf("  [%s] auto-registered to image: dx=%.0f dy=%.0f px", s, sh[1], sh[2]))
-    } else if (length(x)) {
-      pxmin <- min(x); pxmax <- max(x); pymin <- min(y); pymax <- max(y)
-      pcx <- (pxmin + pxmax) / 2; pcy <- (pymin + pymax) / 2
-      rcx <- (e[1] + e[2]) / 2;   rcy <- (e[3] + e[4]) / 2
-      if (align == "bbox") {
-        sx <- if (pxmax > pxmin) (e[2] - e[1]) / (pxmax - pxmin) else 1
-        sy <- if (pymax > pymin) (e[4] - e[3]) / (pymax - pymin) else 1
-        x <- (x - pcx) * sx + rcx; y <- (y - pcy) * sy + rcy
-      } else {                                            # center (keep scale)
-        x <- x - pcx + rcx; y <- y - pcy + rcy
-      }
-      message(sprintf("  [%s] align='%s' -> x[%.0f, %.0f] y[%.0f, %.0f]",
-                      s, align, min(x), max(x), min(y), max(y)))
-    }
+    x <- round(d$x * factor) + x_off
+    yy <- round(d$y * factor)
+    y <- (if (isTRUE(flip_y)) -yy else yy) + y_off
     sh <- shifts[[s]]; if (is.null(sh)) sh <- c(0, 0)
     v <- .gb_build_poly_vect(data.frame(poly_id = d$poly_id,
-                                        x = round(x + sh[1]), y = round(y + sh[2])))
+                                        x = x + sh[1], y = y + sh[2]))
     if (!is.null(v)) vects[[length(vects) + 1L]] <- v
   }
   if (!length(vects)) { warning("No polygons to rasterize for '", stem, "'."); return(NULL) }
@@ -800,26 +711,12 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   \code{"y_slide_mm"}.
 #' @param poly_coord_units Units of the polygon x/y: \code{"mm"} (default,
 #'   converted with \code{1000 / pixel_size_um}) or \code{"px"}.
-#' @param poly_flip_y Logical; negate y to match the raster's flipped frame
-#'   (the raster uses \code{-y_global}). Default \code{TRUE}. If your polygon y
-#'   is already negative (e.g. Seurat has pre-flipped it), set \code{FALSE}.
-#' @param poly_align How to place each slide's polygons onto its image:
-#'   \code{"none"} (default) applies only unit conversion, the y-flip, and the
-#'   manual \code{poly_x_offset_px}/\code{poly_y_offset_px} -- i.e. it assumes
-#'   the polygon coordinates live in the same global frame as the FOV positions
-#'   (top-left-corner origin), which for CosMx gives an exact overlay with zero
-#'   offsets; \code{"center"} translates the polygon bounding-box centre to the
-#'   image centre (approximate: only exact if the tissue is centred in the FOV
-#'   grid); \code{"bbox"} scales and translates the bounding box to fill the
-#'   image extent (can distort). A per-slide diagnostic prints the raw span, the
-#'   units+flip span, and the image span so you can read off any residual offset.
+#' @param poly_flip_y Logical; negate y to match the raster's flipped frame.
+#'   Default \code{TRUE}.
 #' @param poly_x_offset_px,poly_y_offset_px Constant offsets (in original px)
-#'   added after unit conversion/flip, used only when \code{poly_align = "none"}.
-#'   Both default to \code{0} (exact when the polygon coordinates share the FOV
-#'   positions' global frame). If the diagnostic shows a constant gap between the
-#'   units+flip span and the image span, set these to that gap. Each may also be
-#'   a named vector (names = slide names) to give a different offset per slide,
-#'   e.g. \code{poly_x_offset_px = c(MNCharu = -656, TA648 = -160)}.
+#'   added after unit conversion/flip to align polygons to the raster origin.
+#'   Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
+#'   resolves to \code{-fov_size_px}).
 #' @param poly_border_value,poly_border_label Integer burned into the \code{.tif}
 #'   for cell borders and its CSV label. Defaults \code{9999999} and
 #'   \code{"Cell Border"}.
@@ -905,9 +802,8 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    poly_y_col         = "y_slide_mm",
                                    poly_coord_units   = c("mm", "px"),
                                    poly_flip_y        = TRUE,
-                                   poly_align         = c("none", "center", "bbox"),
                                    poly_x_offset_px   = 0,
-                                   poly_y_offset_px   = 0,
+                                   poly_y_offset_px   = NULL,
                                    poly_border_value  = 9999999L,
                                    poly_border_label  = "Cell Border",
                                    backend            = c("bftools", "rbioformats"),
@@ -922,7 +818,6 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   metadata_injector <- match.arg(metadata_injector)
   he_flip <- match.arg(he_flip)
   poly_coord_units <- match.arg(poly_coord_units)
-  poly_align <- match.arg(poly_align)
   if (!requireNamespace("terra", quietly = TRUE))
     stop("Package 'terra' is required. install.packages('terra').")
   downsample_factor  <- as.integer(downsample_factor)
@@ -1042,7 +937,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   # ---- polygon preflight (validate/load before any stitching) ---------------
   do_polygons <- FALSE
   poly_data <- NULL
-  poly_y_off <- if (is.null(poly_y_offset_px)) 0 else poly_y_offset_px
+  poly_y_off <- if (is.null(poly_y_offset_px)) -fov_size_px else poly_y_offset_px
   if (isTRUE(generate_polygons)) {
     if (is.null(polygons)) {
       message("generate_polygons = TRUE but no 'polygons' supplied; skipping ",
@@ -1083,66 +978,43 @@ stitch_fovs_to_ometiff <- function(fov_positions,
       if (!identical(st, 0L)) stop("bfconvert failed for ", basename(ome_tif), ".")
     } else {                                   # rbioformats
       # RBioFormats has no streaming writer: the whole image must fit in RAM as
-      # a double array plus a transpose copy (~2.5x the raw pixel bytes). If that
-      # would not fit in physical RAM, stream with bfconvert when available,
-      # otherwise stop early with a clear message (no point running out of RAM).
+      # a double array (plus a transpose copy). Estimate the peak and lift
+      # macOS's mem.maxVSize cap when possible; for large mosaics use bftools.
       peak_gb <- .gb_rbf_peak_gb(rast)
-      ram_gb  <- .gb_system_ram_mb() / 1024
-      fits    <- !is.finite(ram_gb) || peak_gb <= 0.8 * ram_gb
-      if (!fits) {
-        bf <- if (nzchar(bfconvert)) bfconvert else .gb_find_bftool("bfconvert", bftools_dir)
-        if (nzchar(bf)) {
-          message(sprintf(
-            "  image needs ~%.1f GB in RAM but the system has ~%.0f GB; ",
-            peak_gb, ram_gb),
-            "streaming with bfconvert instead of RBioFormats for this image.")
-          st <- system2(bf, c("-overwrite", shQuote(path.expand(plain)),
-                              shQuote(path.expand(ome_tif))),
-                        stdout = FALSE, stderr = FALSE)
-          if (!identical(st, 0L)) stop("bfconvert failed for ", basename(ome_tif), ".")
-        } else {
-          stop(sprintf(paste0(
-            "This image needs ~%.1f GB of RAM to write with backend = ",
-            "'rbioformats', but the system has ~%.0f GB, and RBioFormats cannot ",
-            "stream to disk. Either (1) use backend = 'bftools' (streams to ",
-            "disk; set bftools_dir = \"/Applications/bftools\" if bftools is not ",
-            "on your PATH), or (2) downsample more (increase downsample_factor ",
-            "and/or combine_downsample)."), peak_gb, ram_gb), call. = FALSE)
-        }
-      } else {
-        message(sprintf(
-          "  RBioFormats loads the full image into RAM: ~%.1f GB peak (%.0f Mpx x %d ch).",
-          peak_gb, terra::ncell(rast) / 1e6, terra::nlyr(rast)))
-        old_vsize <- .gb_raise_vsize(peak_gb * 1024, max_vsize)
-        if (is.finite(old_vsize)) on.exit(try(mem.maxVSize(old_vsize), silent = TRUE), add = TRUE)
+      message(sprintf(
+        "  RBioFormats loads the full image into RAM: ~%.1f GB peak (%.0f Mpx x %d ch). ",
+        peak_gb, terra::ncell(rast) / 1e6, terra::nlyr(rast)),
+        "For large mosaics, backend = 'bftools' streams to disk and avoids this.")
+      old_vsize <- .gb_raise_vsize(peak_gb * 1024, max_vsize)
+      if (is.finite(old_vsize)) on.exit(try(mem.maxVSize(old_vsize), silent = TRUE), add = TRUE)
 
-        arr <- terra::as.array(rast)             # [row, col, band]
-        arr <- aperm(arr, c(2, 1, 3))            # -> [col, row, band]
-        rbf_fail <- function(e) {
-          msg <- conditionMessage(e)
-          if (grepl("memory|vsize|heap|OutOfMemory", msg, ignore.case = TRUE))
-            stop("RBioFormats ran out of memory (~", sprintf("%.1f", peak_gb),
-                 " GB needed). Use backend = 'bftools' (streams to disk), or ",
-                 "downsample more. Original: ", msg, call. = FALSE)
-          stop("RBioFormats::write.image failed (", msg,
-               "); use backend = 'bftools'.", call. = FALSE)
-        }
-        # Prefer little-endian (to match bftools); fall back if the installed
-        # API does not accept the argument.
-        message("  RBioFormats -> ", basename(ome_tif))
-        tryCatch(
-          RBioFormats::write.image(arr, file = path.expand(ome_tif),
-                                   force = overwrite, pixelType = "uint16",
-                                   littleEndian = TRUE),
-          error = function(e) {
-            if (grepl("unused argument|littleEndian", conditionMessage(e)))
-              tryCatch(RBioFormats::write.image(arr, file = path.expand(ome_tif),
-                                                force = overwrite, pixelType = "uint16"),
-                       error = rbf_fail)
-            else rbf_fail(e)
-          })
-        rm(arr); gc(verbose = FALSE)
+      arr <- terra::as.array(rast)             # [row, col, band]
+      arr <- aperm(arr, c(2, 1, 3))            # -> [col, row, band]
+      rbf_fail <- function(e) {
+        msg <- conditionMessage(e)
+        if (grepl("memory|vsize|heap|OutOfMemory", msg, ignore.case = TRUE))
+          stop("RBioFormats ran out of memory (~", sprintf("%.1f", peak_gb),
+               " GB needed). Use backend = 'bftools' (streams to disk), ",
+               "increase 'max_vsize'/'java_heap', or downsample more. Original: ",
+               msg, call. = FALSE)
+        stop("RBioFormats::write.image failed (", msg,
+             "); use backend = 'bftools'.", call. = FALSE)
       }
+      # Prefer little-endian (to match the bftools output); fall back if the
+      # installed API does not accept the argument.
+      message("  RBioFormats -> ", basename(ome_tif))
+      tryCatch(
+        RBioFormats::write.image(arr, file = path.expand(ome_tif),
+                                 force = overwrite, pixelType = "uint16",
+                                 littleEndian = TRUE),
+        error = function(e) {
+          if (grepl("unused argument|littleEndian", conditionMessage(e)))
+            tryCatch(RBioFormats::write.image(arr, file = path.expand(ome_tif),
+                                              force = overwrite, pixelType = "uint16"),
+                     error = rbf_fail)
+          else rbf_fail(e)
+        })
+      rm(arr); gc(verbose = FALSE)
     }
 
     # Inject identical, structure-matching OME-XML (endianness detected from the
@@ -1243,31 +1115,23 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     }
 
     # Polygons: combined (always) + per-slide (if keep_intermediate). Combined
-    # polygons are aligned to each slide's raster frame, then shifted by the
-    # SAME grid offsets as the rasters.
+    # polygons are shifted by the SAME grid offsets as the rasters.
     if (do_polygons) {
       shifts <- stats::setNames(
         lapply(seq_len(n_slides), function(k) c(off$dx[k], off$dy[k])), slide_names)
-      slide_ext <- stats::setNames(
-        lapply(seq_len(n_slides), function(k) as.vector(terra::ext(if_list[[k]]))),
-        slide_names)
-      slide_rast <- stats::setNames(if_list, slide_names)
       written <- c(written, .gb_write_polygons(
         poly_data$verts, poly_data$state_map, merged_if, slide_names, shifts,
-        slide_ext, slide_rast, out_dir, combine_name, pixel_size_um, fov_size_px,
-        poly_coord_units, poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
-        poly_border_value, poly_border_label))
+        out_dir, combine_name, pixel_size_um, fov_size_px, poly_coord_units,
+        poly_flip_y, poly_x_offset_px, poly_y_off, poly_border_value,
+        poly_border_label))
       if (isTRUE(keep_intermediate)) {
         for (s in slide_names) {
           k <- match(s, slide_names)
           written <- c(written, .gb_write_polygons(
             poly_data$verts, poly_data$state_map, if_list[[k]], s,
-            stats::setNames(list(c(0, 0)), s),
-            stats::setNames(list(as.vector(terra::ext(if_list[[k]]))), s),
-            stats::setNames(list(if_list[[k]]), s),
-            out_dir, s, pixel_size_um, fov_size_px, poly_coord_units,
-            poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
-            poly_border_value, poly_border_label))
+            stats::setNames(list(c(0, 0)), s), out_dir, s, pixel_size_um,
+            fov_size_px, poly_coord_units, poly_flip_y, poly_x_offset_px,
+            poly_y_off, poly_border_value, poly_border_label))
         }
       }
     }
@@ -1287,12 +1151,9 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     if (do_polygons)
       written <- c(written, .gb_write_polygons(
         poly_data$verts, poly_data$state_map, if_list[[s]], stem,
-        stats::setNames(list(c(0, 0)), stem),
-        stats::setNames(list(as.vector(terra::ext(if_list[[s]]))), stem),
-        stats::setNames(list(if_list[[s]]), stem),
-        out_dir, stem, pixel_size_um, fov_size_px, poly_coord_units,
-        poly_flip_y, poly_align, poly_x_offset_px, poly_y_off,
-        poly_border_value, poly_border_label))
+        stats::setNames(list(c(0, 0)), stem), out_dir, stem, pixel_size_um,
+        fov_size_px, poly_coord_units, poly_flip_y, poly_x_offset_px,
+        poly_y_off, poly_border_value, poly_border_label))
     unlink(attr(if_list[[s]], "gb_tmp"))
   }
   invisible(written)
@@ -1367,8 +1228,6 @@ if (sys.nframe() == 0) {
       help = "y column in the polygon table [default= %default]"),
     optparse::make_option(c("--poly_coord_units"), type = "character", default = "mm",
       help = "'mm' or 'px' for polygon coordinates [default= %default]"),
-    optparse::make_option(c("--poly_align"), type = "character", default = "none",
-      help = "Polygon-to-image alignment: 'none', 'center', or 'bbox' [default= %default]"),
     optparse::make_option(c("-k", "--keep_intermediate"), action = "store_true", default = FALSE,
       help = "Keep intermediate .tif/.xml (and per-slide polygons) [default= %default]"),
     optparse::make_option(c("--no_overwrite"), action = "store_true", default = FALSE,
@@ -1410,7 +1269,6 @@ if (sys.nframe() == 0) {
     poly_x_col         = opt$poly_x_col,
     poly_y_col         = opt$poly_y_col,
     poly_coord_units   = opt$poly_coord_units,
-    poly_align         = opt$poly_align,
     backend            = opt$backend,
     metadata_injector  = opt$metadata_injector,
     bftools_dir        = opt$bftools_dir,
