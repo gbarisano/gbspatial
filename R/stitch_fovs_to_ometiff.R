@@ -404,6 +404,196 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   c(nr, nc)
 }
 
+# ---- polygon helpers ---------------------------------------------------------
+
+# Extract one polygon input (Seurat object or data.frame) into a long table with
+# columns cell, x, y (one row per polygon vertex), slide, State.
+.gb_extract_polys_one <- function(obj, state_col, slide_col, cell_col,
+                                  x_col, y_col, default_slide) {
+  if (inherits(obj, "Seurat")) {
+    if (!requireNamespace("SeuratObject", quietly = TRUE) &&
+        !requireNamespace("Seurat", quietly = TRUE))
+      stop("A Seurat object was supplied but neither 'SeuratObject' nor ",
+           "'Seurat' is installed.", call. = FALSE)
+    md <- obj@meta.data
+    if (!state_col %in% names(md))
+      stop("state_col '", state_col, "' is not a column of the Seurat ",
+           "meta.data. Available (first 20): ",
+           paste(utils::head(names(md), 20), collapse = ", "), call. = FALSE)
+    if (is.na(default_slide) && !(slide_col %in% names(md)))
+      stop("poly_slide_col '", slide_col, "' is not in the Seurat meta.data, ",
+           "and a single combined object was supplied. Set 'poly_slide_col' or ",
+           "pass one object per slide.", call. = FALSE)
+    md$.cell <- rownames(md)
+    getimg <- if (requireNamespace("SeuratObject", quietly = TRUE)) SeuratObject::Images else Seurat::Images
+    getcoord <- if (requireNamespace("SeuratObject", quietly = TRUE)) SeuratObject::GetTissueCoordinates else Seurat::GetTissueCoordinates
+    ims <- tryCatch(getimg(obj), error = function(e) character(0))
+    if (!length(ims))
+      stop("The Seurat object has no spatial images/FOVs, so segmentation ",
+           "polygons cannot be extracted. Provide a polygon table instead ",
+           "(see 'polygons').", call. = FALSE)
+    coords <- list()
+    for (im in ims) {
+      gc <- tryCatch(getcoord(obj[[im]], which = "segmentation"),
+                     error = function(e) NULL)
+      if (!is.null(gc)) coords[[im]] <- as.data.frame(gc)
+    }
+    if (!length(coords))
+      stop("GetTissueCoordinates(..., which = 'segmentation') returned nothing; ",
+           "your Seurat/CosMx version may store cell boundaries differently. ",
+           "Provide a polygon table instead.", call. = FALSE)
+    cd <- do.call(rbind, coords)
+    nm <- tolower(names(cd))
+    cx <- which(nm == "x")[1]; cy <- which(nm == "y")[1]
+    cc <- which(nm %in% c("cell", "cell_id", "cellid"))[1]
+    if (anyNA(c(cx, cy, cc)))
+      stop("Unexpected columns from GetTissueCoordinates: ",
+           paste(names(cd), collapse = ", "),
+           " (need x, y, cell).", call. = FALSE)
+    out <- data.frame(cell = as.character(cd[[cc]]), x = cd[[cx]], y = cd[[cy]],
+                      stringsAsFactors = FALSE)
+    out$slide <- if (!is.na(default_slide)) default_slide
+                 else md[[slide_col]][match(out$cell, md$.cell)]
+    out$State <- md[[state_col]][match(out$cell, md$.cell)]
+    return(out[!is.na(out$State), , drop = FALSE])
+  }
+  if (is.data.frame(obj)) {
+    need <- c(cell_col, x_col, y_col, state_col)
+    miss <- setdiff(need, names(obj))
+    if (length(miss))
+      stop("Polygon table is missing column(s): ", paste(miss, collapse = ", "),
+           ". Available (first 30): ", paste(utils::head(names(obj), 30), collapse = ", "),
+           ". Set poly_cell_col / poly_x_col / poly_y_col / state_col.", call. = FALSE)
+    slide <- if (!is.na(default_slide)) rep(default_slide, nrow(obj)) else {
+      if (!(slide_col %in% names(obj)))
+        stop("Polygon table needs a slide column '", slide_col,
+             "' (poly_slide_col), or pass one table per slide.", call. = FALSE)
+      as.character(obj[[slide_col]])
+    }
+    return(data.frame(cell = as.character(obj[[cell_col]]),
+                      x = obj[[x_col]], y = obj[[y_col]],
+                      slide = slide, State = obj[[state_col]],
+                      stringsAsFactors = FALSE))
+  }
+  stop("Each 'polygons' input must be a Seurat object or a data.frame (or an ",
+       "RDS path to one).", call. = FALSE)
+}
+
+# Load + validate all polygon inputs. Returns list(verts = named-by-slide list
+# of data.frame(poly_id, x, y in vertex order), state_map = data.frame(poly_id,
+# State)). Called during preflight so problems surface before any stitching.
+.gb_load_polygons <- function(polygons, slide_names, state_col, slide_col,
+                              cell_col, x_col, y_col) {
+  if (is.null(state_col) || !nzchar(state_col))
+    stop("Polygon generation needs 'state_col': the column to use as the ",
+         "Minerva State (e.g. a cluster or cell-type column). Set it, or set ",
+         "generate_polygons = FALSE.", call. = FALSE)
+  n_slides <- length(slide_names)
+  inputs <- polygons
+  if (inherits(inputs, "Seurat") || is.data.frame(inputs)) inputs <- list(inputs)
+  if (is.character(inputs))
+    inputs <- lapply(inputs, function(p) {
+      if (!file.exists(p)) stop("Polygon file not found: ", p, call. = FALSE)
+      readRDS(p)
+    })
+  if (!is.list(inputs))
+    stop("'polygons' must be a Seurat object, a data.frame, an RDS file path, ",
+         "or a list of these.", call. = FALSE)
+  n_in <- length(inputs)
+  if (!n_in %in% c(1L, n_slides))
+    stop("Provide either 1 combined 'polygons' input or exactly ", n_slides,
+         " (one per slide); got ", n_in, ".", call. = FALSE)
+
+  long <- vector("list", n_in)
+  for (i in seq_len(n_in)) {
+    default_slide <- if (n_in == n_slides) slide_names[i] else NA_character_
+    long[[i]] <- .gb_extract_polys_one(inputs[[i]], state_col, slide_col,
+                                       cell_col, x_col, y_col, default_slide)
+  }
+  df <- do.call(rbind, long)
+  df <- df[!is.na(df$slide), , drop = FALSE]
+  have <- unique(df$slide)
+  miss <- setdiff(slide_names, have)
+  if (length(miss) == n_slides)
+    stop("None of the requested slides (", paste(slide_names, collapse = ", "),
+         ") were found in the polygon slide column '", slide_col, "'. Found: ",
+         paste(utils::head(have, 10), collapse = ", "),
+         ". Check 'poly_slide_col' and that the names match 'slide_names'.",
+         call. = FALSE)
+  if (length(miss))
+    warning("No polygons found for slide(s): ", paste(miss, collapse = ", "),
+            ".", call. = FALSE)
+  df <- df[df$slide %in% slide_names, , drop = FALSE]
+  if (!nrow(df)) stop("No polygon vertices remain after filtering to the ",
+                      "requested slides.", call. = FALSE)
+
+  # Global unique poly_id per (slide, cell), preserving vertex order.
+  key <- paste(df$slide, df$cell, sep = "\r")
+  df$poly_id <- match(key, unique(key))
+  state_map <- df[!duplicated(df$poly_id), c("poly_id", "State")]
+  verts <- lapply(slide_names, function(s)
+    df[df$slide == s, c("poly_id", "x", "y")])
+  names(verts) <- slide_names
+  list(verts = verts, state_map = state_map)
+}
+
+# Build a SpatVector of polygons from a data.frame(poly_id, x, y). Vertices are
+# grouped by poly_id (ascending); cells with < 3 vertices are dropped.
+.gb_build_poly_vect <- function(d) {
+  d <- d[order(d$poly_id, seq_len(nrow(d))), , drop = FALSE]  # stable, ascending
+  tab <- table(d$poly_id)
+  ok_ids <- as.numeric(names(tab))[tab >= 3L]
+  d <- d[d$poly_id %in% ok_ids, , drop = FALSE]
+  if (!nrow(d)) return(NULL)
+  v <- terra::vect(as.matrix(d[, c("poly_id", "x", "y")]), type = "polygons")
+  terra::values(v) <- data.frame(poly_id = sort(unique(d$poly_id)))
+  v
+}
+
+# Transform vertex coordinates (per slide), shift, rasterize filled cells +
+# borders onto `template`, and write <stem>_polygons.tif and _polygons.csv.
+.gb_write_polygons <- function(verts, state_map, template, slide_set, shifts,
+                               out_dir, stem, pixel_size_um, fov_size_px,
+                               units, flip_y, x_off, y_off, border_value,
+                               border_label) {
+  factor <- if (units == "mm") 1000 / pixel_size_um else 1
+  vects <- list()
+  for (s in slide_set) {
+    d <- verts[[s]]
+    if (is.null(d) || !nrow(d)) next
+    x <- round(d$x * factor) + x_off
+    yy <- round(d$y * factor)
+    y <- (if (isTRUE(flip_y)) -yy else yy) + y_off
+    sh <- shifts[[s]]; if (is.null(sh)) sh <- c(0, 0)
+    v <- .gb_build_poly_vect(data.frame(poly_id = d$poly_id,
+                                        x = x + sh[1], y = y + sh[2]))
+    if (!is.null(v)) vects[[length(vects) + 1L]] <- v
+  }
+  if (!length(vects)) { warning("No polygons to rasterize for '", stem, "'."); return(NULL) }
+  master <- if (length(vects) == 1L) vects[[1]] else do.call(rbind, vects)
+
+  tmpl <- terra::rast(template[[1]])          # empty raster, same geometry
+  message("  rasterizing ", nrow(master), " cell polygons for '", stem, "' ...")
+  tmp_fill <- tempfile(tmpdir = out_dir, fileext = ".tif")
+  base_mask <- terra::rasterize(master, tmpl, field = "poly_id", background = 0,
+                                filename = tmp_fill, overwrite = TRUE)
+  borders <- terra::as.lines(master)
+  borders$ub <- border_value
+  poly_tif <- file.path(out_dir, paste0(stem, "_polygons.tif"))
+  terra::rasterize(borders, base_mask, field = "ub", update = TRUE,
+                   filename = poly_tif, datatype = "INT4U", overwrite = TRUE,
+                   wopt = list(gdal = c("COMPRESS=LZW", "BIGTIFF=YES")))
+  unlink(tmp_fill)
+
+  cs <- state_map[order(state_map$poly_id), , drop = FALSE]
+  cs <- data.frame(CellID = cs$poly_id, State = cs$State, stringsAsFactors = FALSE)
+  cs <- rbind(cs, data.frame(CellID = border_value, State = border_label))
+  poly_csv <- file.path(out_dir, paste0(stem, "_polygons.csv"))
+  utils::write.csv(cs, poly_csv, row.names = FALSE, quote = FALSE)
+  message("  wrote ", basename(poly_tif), " and ", basename(poly_csv))
+  c(poly_tif, poly_csv)
+}
+
 
 #' Stitch CosMx per-FOV morphology images into a Minerva-ready OME-TIFF
 #'
@@ -468,6 +658,39 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
 #'   (default), \code{"horizontal"}, \code{"both"}, or \code{"none"}.
 #' @param he_resample_method \pkg{terra} resampling method used to put H&E on the
 #'   IF grid. Default \code{"average"} (good for downsampling).
+#' @param generate_polygons Logical; if \code{TRUE} (default) and \code{polygons}
+#'   is supplied, also write Minerva cell-polygon outputs: a \code{.tif} whose
+#'   cells are filled with an integer id (cell borders burned in as
+#'   \code{poly_border_value}) and a CSV mapping \code{CellID} to \code{State}
+#'   (plus a border row). No OME-TIFF is made for these -- Minerva converts the
+#'   plain \code{.tif} itself. If \code{polygons} is \code{NULL}, polygon output
+#'   is skipped with a message.
+#' @param polygons Cell-boundary input: a \pkg{Seurat} object, a data.frame with
+#'   one row per polygon vertex, an \code{.rds} path to either, or a list of
+#'   these (one combined input, or one per slide). For a Seurat object, vertices
+#'   come from \code{GetTissueCoordinates(obj, which = "segmentation")} and the
+#'   slide/State from \code{meta.data}; for a table, from the columns named
+#'   below.
+#' @param state_col Column holding the Minerva State (e.g. a cluster/cell-type
+#'   column) in the Seurat \code{meta.data} or the polygon table. Required when
+#'   generating polygons.
+#' @param poly_slide_col Slide-identifier column used to split a combined input
+#'   by slide; its values must match \code{slide_names}. Default
+#'   \code{"Run_Tissue_name"}.
+#' @param poly_cell_col,poly_x_col,poly_y_col For table input: the cell-id, x and
+#'   y column names. Defaults \code{"cell_ID"}, \code{"x_slide_mm"},
+#'   \code{"y_slide_mm"}.
+#' @param poly_coord_units Units of the polygon x/y: \code{"mm"} (default,
+#'   converted with \code{1000 / pixel_size_um}) or \code{"px"}.
+#' @param poly_flip_y Logical; negate y to match the raster's flipped frame.
+#'   Default \code{TRUE}.
+#' @param poly_x_offset_px,poly_y_offset_px Constant offsets (in original px)
+#'   added after unit conversion/flip to align polygons to the raster origin.
+#'   Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
+#'   resolves to \code{-fov_size_px}).
+#' @param poly_border_value,poly_border_label Integer burned into the \code{.tif}
+#'   for cell borders and its CSV label. Defaults \code{9999999} and
+#'   \code{"Cell Border"}.
 #' @param backend \code{"bftools"} (default) or \code{"rbioformats"}. Both build
 #'   an OME-TIFF and then inject the generated OME-XML with \code{tiffcomment}
 #'   (so channel names/colours/physical size are embedded identically and
@@ -541,6 +764,19 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    he_images          = NULL,
                                    he_flip            = c("vertical", "horizontal", "both", "none"),
                                    he_resample_method = "average",
+                                   generate_polygons  = TRUE,
+                                   polygons           = NULL,
+                                   state_col          = NULL,
+                                   poly_slide_col     = "Run_Tissue_name",
+                                   poly_cell_col      = "cell_ID",
+                                   poly_x_col         = "x_slide_mm",
+                                   poly_y_col         = "y_slide_mm",
+                                   poly_coord_units   = c("mm", "px"),
+                                   poly_flip_y        = TRUE,
+                                   poly_x_offset_px   = 0,
+                                   poly_y_offset_px   = NULL,
+                                   poly_border_value  = 9999999L,
+                                   poly_border_label  = "Cell Border",
                                    backend            = c("bftools", "rbioformats"),
                                    metadata_injector  = c("auto", "tiffcomment", "java"),
                                    bftools_dir        = NULL,
@@ -552,6 +788,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   backend <- match.arg(backend)
   metadata_injector <- match.arg(metadata_injector)
   he_flip <- match.arg(he_flip)
+  poly_coord_units <- match.arg(poly_coord_units)
   if (!requireNamespace("terra", quietly = TRUE))
     stop("Package 'terra' is required. install.packages('terra').")
   downsample_factor  <- as.integer(downsample_factor)
@@ -646,6 +883,24 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     if (!identical(st, 0L)) stop("tiffcomment failed for ", basename(ome_tif), ".")
     if (!keep_intermediate) unlink(xml_file)
     invisible(TRUE)
+  }
+
+  # ---- polygon preflight (validate/load before any stitching) ---------------
+  do_polygons <- FALSE
+  poly_data <- NULL
+  poly_y_off <- if (is.null(poly_y_offset_px)) -fov_size_px else poly_y_offset_px
+  if (isTRUE(generate_polygons)) {
+    if (is.null(polygons)) {
+      message("generate_polygons = TRUE but no 'polygons' supplied; skipping ",
+              "polygon outputs. Provide 'polygons' (a Seurat object / vertex ",
+              "table / RDS path, or a list of these) and 'state_col' to enable.")
+    } else {
+      message("Validating polygon inputs ...")
+      poly_data <- .gb_load_polygons(polygons, slide_names, state_col,
+                                     poly_slide_col, poly_cell_col,
+                                     poly_x_col, poly_y_col)
+      do_polygons <- TRUE
+    }
   }
 
   # ---- helper: write an IF SpatRaster to a Minerva OME-TIFF -----------------
@@ -809,6 +1064,29 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                          paste0(combine_name, "_he"), eff_um_c))
       unlink(tmp3)
     }
+
+    # Polygons: combined (always) + per-slide (if keep_intermediate). Combined
+    # polygons are shifted by the SAME grid offsets as the rasters.
+    if (do_polygons) {
+      shifts <- stats::setNames(
+        lapply(seq_len(n_slides), function(k) c(off$dx[k], off$dy[k])), slide_names)
+      written <- c(written, .gb_write_polygons(
+        poly_data$verts, poly_data$state_map, merged_if, slide_names, shifts,
+        out_dir, combine_name, pixel_size_um, fov_size_px, poly_coord_units,
+        poly_flip_y, poly_x_offset_px, poly_y_off, poly_border_value,
+        poly_border_label))
+      if (isTRUE(keep_intermediate)) {
+        for (s in slide_names) {
+          k <- match(s, slide_names)
+          written <- c(written, .gb_write_polygons(
+            poly_data$verts, poly_data$state_map, if_list[[k]], s,
+            stats::setNames(list(c(0, 0)), s), out_dir, s, pixel_size_um,
+            fov_size_px, poly_coord_units, poly_flip_y, poly_x_offset_px,
+            poly_y_off, poly_border_value, poly_border_label))
+        }
+      }
+    }
+
     unlink(c(tmp1, if (exists("tmp2")) tmp2 else NULL))
     for (r in if_list) unlink(attr(r, "gb_tmp"))
     return(invisible(written))
@@ -821,6 +1099,12 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     if (!is.null(he_images))
       written <- c(written, write_he_ome(he_list[[s]], if_list[[s]],
                                          paste0(stem, "_he"), eff_um))
+    if (do_polygons)
+      written <- c(written, .gb_write_polygons(
+        poly_data$verts, poly_data$state_map, if_list[[s]], stem,
+        stats::setNames(list(c(0, 0)), stem), out_dir, stem, pixel_size_um,
+        fov_size_px, poly_coord_units, poly_flip_y, poly_x_offset_px,
+        poly_y_off, poly_border_value, poly_border_label))
     unlink(attr(if_list[[s]], "gb_tmp"))
   }
   invisible(written)
@@ -879,8 +1163,24 @@ if (sys.nframe() == 0) {
       help = "rbioformats/macOS only: R vector-memory limit in MB (mem.maxVSize)."),
     optparse::make_option(c("--java_heap"), type = "character", default = NULL,
       help = "rbioformats only: JVM max heap, e.g. '24g' or '18000m' (default ~70%% RAM)."),
+    optparse::make_option(c("--no_polygons"), action = "store_true", default = FALSE,
+      help = "Disable Minerva polygon output."),
+    optparse::make_option(c("--polygons"), type = "character", default = NULL,
+      help = "Comma-separated .rds path(s) to polygon vertex table(s)/Seurat object(s)."),
+    optparse::make_option(c("--state_col"), type = "character", default = NULL,
+      help = "Column to use as the Minerva State (required for polygons)."),
+    optparse::make_option(c("--poly_slide_col"), type = "character", default = "Run_Tissue_name",
+      help = "Slide-id column in the polygon input [default= %default]"),
+    optparse::make_option(c("--poly_cell_col"), type = "character", default = "cell_ID",
+      help = "Cell-id column in the polygon table [default= %default]"),
+    optparse::make_option(c("--poly_x_col"), type = "character", default = "x_slide_mm",
+      help = "x column in the polygon table [default= %default]"),
+    optparse::make_option(c("--poly_y_col"), type = "character", default = "y_slide_mm",
+      help = "y column in the polygon table [default= %default]"),
+    optparse::make_option(c("--poly_coord_units"), type = "character", default = "mm",
+      help = "'mm' or 'px' for polygon coordinates [default= %default]"),
     optparse::make_option(c("-k", "--keep_intermediate"), action = "store_true", default = FALSE,
-      help = "Keep intermediate .tif/.xml [default= %default]"),
+      help = "Keep intermediate .tif/.xml (and per-slide polygons) [default= %default]"),
     optparse::make_option(c("--no_overwrite"), action = "store_true", default = FALSE,
       help = "Do not overwrite existing outputs.")
   )
@@ -912,6 +1212,14 @@ if (sys.nframe() == 0) {
     he_images          = split_csv(opt$he_images),
     he_flip            = opt$he_flip,
     he_resample_method = opt$he_resample_method,
+    generate_polygons  = !opt$no_polygons,
+    polygons           = split_csv(opt$polygons),
+    state_col          = opt$state_col,
+    poly_slide_col     = opt$poly_slide_col,
+    poly_cell_col      = opt$poly_cell_col,
+    poly_x_col         = opt$poly_x_col,
+    poly_y_col         = opt$poly_y_col,
+    poly_coord_units   = opt$poly_coord_units,
     backend            = opt$backend,
     metadata_injector  = opt$metadata_injector,
     bftools_dir        = opt$bftools_dir,
