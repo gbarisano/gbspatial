@@ -21,6 +21,19 @@ stitch_fovs_to_ometiff(
   he_images = NULL,
   he_flip = c("vertical", "horizontal", "both", "none"),
   he_resample_method = "average",
+  generate_polygons = TRUE,
+  polygons = NULL,
+  state_col = NULL,
+  poly_slide_col = "Run_Tissue_name",
+  poly_cell_col = "cell_ID",
+  poly_x_col = "x_slide_mm",
+  poly_y_col = "y_slide_mm",
+  poly_coord_units = c("mm", "px"),
+  poly_flip_y = TRUE,
+  poly_x_offset_px = 0,
+  poly_y_offset_px = NULL,
+  poly_border_value = 9999999L,
+  poly_border_label = "Cell Border",
   backend = c("bftools", "rbioformats"),
   metadata_injector = c("auto", "tiffcomment", "java"),
   bftools_dir = NULL,
@@ -79,6 +92,48 @@ paths, one per slide (length must equal the number of slides). RGB.}
 
 \item{he_resample_method}{\pkg{terra} resampling method used to put H&E on the
 IF grid. Default \code{"average"} (good for downsampling).}
+
+\item{generate_polygons}{Logical; if \code{TRUE} (default) and \code{polygons}
+is supplied, also write Minerva cell-polygon outputs: a \code{.tif} whose
+cells are filled with an integer id (cell borders burned in as
+\code{poly_border_value}) and a CSV mapping \code{CellID} to \code{State}
+(plus a border row). No OME-TIFF is made for these -- Minerva converts the
+plain \code{.tif} itself. If \code{polygons} is \code{NULL}, polygon output
+is skipped with a message.}
+
+\item{polygons}{Cell-boundary input: a \pkg{Seurat} object, a data.frame with
+one row per polygon vertex, an \code{.rds} path to either, or a list of
+these (one combined input, or one per slide). For a Seurat object, vertices
+come from \code{GetTissueCoordinates(obj, which = "segmentation")} and the
+slide/State from \code{meta.data}; for a table, from the columns named
+below.}
+
+\item{state_col}{Column holding the Minerva State (e.g. a cluster/cell-type
+column) in the Seurat \code{meta.data} or the polygon table. Required when
+generating polygons.}
+
+\item{poly_slide_col}{Slide-identifier column used to split a combined input
+by slide; its values must match \code{slide_names}. Default
+\code{"Run_Tissue_name"}.}
+
+\item{poly_cell_col, poly_x_col, poly_y_col}{For table input: the cell-id, x and
+y column names. Defaults \code{"cell_ID"}, \code{"x_slide_mm"},
+\code{"y_slide_mm"}.}
+
+\item{poly_coord_units}{Units of the polygon x/y: \code{"mm"} (default,
+converted with \code{1000 / pixel_size_um}) or \code{"px"}.}
+
+\item{poly_flip_y}{Logical; negate y to match the raster's flipped frame.
+Default \code{TRUE}.}
+
+\item{poly_x_offset_px, poly_y_offset_px}{Constant offsets (in original px)
+added after unit conversion/flip to align polygons to the raster origin.
+Defaults \code{0} and \code{-fov_size_px} (\code{poly_y_offset_px = NULL}
+resolves to \code{-fov_size_px}).}
+
+\item{poly_border_value, poly_border_label}{Integer burned into the \code{.tif}
+for cell borders and its CSV label. Defaults \code{9999999} and
+\code{"Cell Border"}.}
 
 \item{backend}{\code{"bftools"} (default) or \code{"rbioformats"}. Both build
 an OME-TIFF and then inject the generated OME-XML with \code{tiffcomment}
