@@ -22,6 +22,7 @@ stitch_fovs_to_ometiff(
   he_flip = c("vertical", "horizontal", "both", "none"),
   he_resample_method = "average",
   backend = c("bftools", "rbioformats"),
+  metadata_injector = c("auto", "tiffcomment", "java"),
   bftools_dir = NULL,
   max_vsize = NULL,
   java_heap = NULL,
@@ -79,11 +80,22 @@ paths, one per slide (length must equal the number of slides). RGB.}
 \item{he_resample_method}{\pkg{terra} resampling method used to put H&E on the
 IF grid. Default \code{"average"} (good for downsampling).}
 
-\item{backend}{\code{"bftools"} (default) or \code{"rbioformats"}. The
-\code{"bftools"} path streams to disk and uses roughly constant memory
-regardless of image size; \code{"rbioformats"} must hold the entire image
-in RAM (as a double array plus a transpose copy) and can exhaust memory on
-large mosaics, so prefer \code{"bftools"} for combined/whole-TMA images.}
+\item{backend}{\code{"bftools"} (default) or \code{"rbioformats"}. Both build
+an OME-TIFF and then inject the generated OME-XML with \code{tiffcomment}
+(so channel names/colours/physical size are embedded identically and
+Minerva can read the file); \code{tiffcomment} is therefore required for
+both. The \code{"bftools"} path builds the container with \code{bfconvert},
+streams to disk, and uses roughly constant memory; \code{"rbioformats"}
+builds it with \pkg{RBioFormats} but must hold the whole image in RAM, so
+prefer \code{"bftools"} for large/combined images.}
+
+\item{metadata_injector}{How to embed the OME-XML: \code{"auto"} (default)
+uses in-process Bio-Formats (\pkg{RBioFormats}, no external tool) when the
+backend is \code{"rbioformats"} and the classes are available, otherwise
+\code{tiffcomment}; \code{"java"} forces the in-process route (rbioformats
+only, no fallback); \code{"tiffcomment"} forces the \code{tiffcomment} CLI.
+With \code{backend = "rbioformats"}, \code{metadata_injector = "auto"} and
+no \code{he_images}, no bftools tools are required at all.}
 
 \item{bftools_dir}{Directory with \code{bfconvert}/\code{tiffcomment}
 (e.g. \code{"/Applications/bftools"}); otherwise found on \code{PATH}.}
