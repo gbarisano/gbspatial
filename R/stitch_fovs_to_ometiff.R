@@ -11,6 +11,11 @@
 #     grid (rows x cols, input order = fill order) with extra downsampling.
 #   * Optionally processes a co-registered H&E image per slide, forced onto the
 #     SAME spatial grid as the IF output so the two OME-TIFFs overlay exactly.
+#   * Reuses an IF OME-TIFF that is already in out_dir when overwrite = FALSE
+#     (the default): the morphology TIFFs are never opened, the output grid is
+#     reconstructed from the FOV positions files, and only the remaining
+#     products (cell polygons, H&E) are built. Lets you iterate on polygons
+#     without repeating the stitch.
 #   * Optionally writes Minerva cell-polygon outputs, aligning the polygon
 #     coordinate frame to the FOV grid separately for each slide, so that both
 #     TransferPolygonsToSeurat() output and raw AtoMx/CosMx Seurat objects work
@@ -418,6 +423,113 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   c(nr, nc)
 }
 
+# ---- output-grid reconstruction (used when reusing an existing OME-TIFF) -----
+
+# Rebuild the SpatRaster GEOMETRY that .gb_merge_slide() would produce for one
+# slide, without opening a single morphology TIFF. An OME-TIFF carries no
+# georeferencing, so terra::rast() on the existing output would report a plain
+# 0..ncol extent -- useless for placing polygons, which live in the FOV-pixel
+# frame. Reconstructing from the positions file reproduces that frame exactly:
+# resolution and the per-FOV origin snap follow the same formulas as
+# .gb_merge_slide(). Returns a valueless SpatRaster (cheap: no pixels).
+.gb_slide_grid <- function(fov_positions, image_dir, pixel_size_um,
+                           fov_size_px, downsample_factor) {
+  tiles <- .gb_read_fov_positions(fov_positions, pixel_size_um)
+  # Apply the same "drop FOVs that have no image" filter as .gb_merge_slide();
+  # this only lists filenames, it never opens them. If the morphology directory
+  # is gone (a common case when reusing an old output), keep every FOV.
+  if (!is.null(image_dir) && is.character(image_dir) &&
+      length(image_dir) == 1L && dir.exists(image_dir)) {
+    imgmap <- tryCatch(
+      suppressWarnings(.gb_match_images_to_fovs(image_dir, tiles$FOV)),
+      error = function(e) NULL)
+    if (!is.null(imgmap)) tiles <- tiles[!is.na(imgmap), , drop = FALSE]
+  } else {
+    message("  morphology directory unavailable; reconstructing the grid from ",
+            "every FOV in the positions file.")
+  }
+  if (!nrow(tiles))
+    stop("No FOVs left when reconstructing the output grid.", call. = FALSE)
+  ncol_f <- ceiling(fov_size_px / downsample_factor)  # cells along a FOV edge
+  res_px <- fov_size_px / ncol_f                      # original px per cell
+  xmin <-  round(tiles$x_px / res_px) * res_px
+  ymax <- -round(tiles$y_px / res_px) * res_px
+  terra::rast(terra::ext(min(xmin), max(xmin) + fov_size_px,
+                         min(ymax) - fov_size_px, max(ymax)),
+              resolution = res_px)
+}
+
+# Geometry of the union of several already-shifted grids sharing a resolution
+# (what terra::merge() would return).
+.gb_union_grid <- function(rasters) {
+  x0 <- vapply(rasters, terra::xmin, 0); x1 <- vapply(rasters, terra::xmax, 0)
+  y0 <- vapply(rasters, terra::ymin, 0); y1 <- vapply(rasters, terra::ymax, 0)
+  terra::rast(terra::ext(min(x0), max(x1), min(y0), max(y1)),
+              resolution = terra::res(rasters[[1]]))
+}
+
+# Geometry after terra::aggregate(fact = f): xmin/ymax are kept and xmax/ymin
+# extended to cover ceiling(n / f) coarse cells.
+.gb_agg_grid <- function(tmpl, fact) {
+  fact <- as.integer(fact)
+  if (is.na(fact) || fact <= 1L) return(tmpl)
+  r  <- terra::res(tmpl) * fact
+  nc <- ceiling(terra::ncol(tmpl) / fact)
+  nr <- ceiling(terra::nrow(tmpl) / fact)
+  terra::rast(terra::ext(terra::xmin(tmpl), terra::xmin(tmpl) + nc * r[1],
+                         terra::ymax(tmpl) - nr * r[2], terra::ymax(tmpl)),
+              resolution = r)
+}
+
+# Read a per-slide IF OME-TIFF written by an earlier run back into the frame
+# .gb_merge_slide() would have produced, so it can feed the combine step
+# directly instead of re-stitching from the morphology TIFFs. The file carries
+# no georeferencing, so `grid` (from .gb_slide_grid()) supplies the extent; the
+# dimensions must agree or the reused pixels would sit in the wrong place.
+# NAflag is restored to 0 because the original mosaic used 0 as nodata and the
+# OME-TIFF does not record that.
+.gb_load_slide_ome <- function(path, grid, slide) {
+  r <- suppressWarnings(terra::rast(path))
+  if (terra::ncol(r) != terra::ncol(grid) || terra::nrow(r) != terra::nrow(grid))
+    stop(sprintf(paste0(
+      "'%s' is %d x %d px but slide '%s' reconstructs to %d x %d. That file ",
+      "was made with different settings, so it cannot be reused for the ",
+      "combined image. Re-run with overwrite = TRUE, or match the original ",
+      "settings."), basename(path), terra::ncol(r), terra::nrow(r), slide,
+      terra::ncol(grid), terra::nrow(grid)), call. = FALSE)
+  terra::ext(r) <- terra::ext(grid)
+  terra::NAflag(r) <- 0
+  message("  reusing pixels from ", basename(path), " (", terra::ncol(r), " x ",
+          terra::nrow(r), " px, ", terra::nlyr(r), " bands); no re-stitch.")
+  r
+}
+
+# Confirm a reconstructed grid matches the OME-TIFF being reused. A mismatch
+# means the current settings are not the ones that produced the file, so
+# anything drawn on the reconstructed grid would be misaligned -- fail loudly
+# rather than write silently wrong polygons.
+.gb_verify_grid <- function(tmpl, ome_tif) {
+  r <- tryCatch(suppressWarnings(terra::rast(ome_tif)), error = function(e) NULL)
+  if (is.null(r)) {
+    warning("Could not open '", basename(ome_tif), "' to check it against the ",
+            "reconstructed grid; continuing unverified.", call. = FALSE)
+    return(invisible(NA))
+  }
+  if (terra::ncol(r) != terra::ncol(tmpl) || terra::nrow(r) != terra::nrow(tmpl))
+    stop(sprintf(paste0(
+      "'%s' is %d x %d px, but the current settings imply a %d x %d grid. That ",
+      "file was produced with different parameters (downsample_factor, ",
+      "fov_size_px, the slide set or its order, slide_layout, slide_gap or ",
+      "combine_downsample), so polygons or H&E written onto the reconstructed ",
+      "grid would not line up. Re-run with overwrite = TRUE to rebuild, or ",
+      "restore the original settings."),
+      basename(ome_tif), terra::ncol(r), terra::nrow(r),
+      terra::ncol(tmpl), terra::nrow(tmpl)), call. = FALSE)
+  message("  grid check: ", basename(ome_tif), " is ", terra::ncol(r), " x ",
+          terra::nrow(r), " px, matching the reconstructed grid.")
+  invisible(TRUE)
+}
+
 # ---- polygon helpers ---------------------------------------------------------
 
 # Coerce a FOV column to integer, tolerating factors and names like "F003".
@@ -778,7 +890,10 @@ paste(chan_xml, collapse = "\n"), "\n", paste(tiff_xml, collapse = "\n"), "\n",
   if (!length(vects)) { warning("No polygons to rasterize for '", stem, "'."); return(NULL) }
   master <- if (length(vects) == 1L) vects[[1]] else do.call(rbind, vects)
 
-  tmpl <- terra::rast(template[[1]])          # empty raster, same geometry
+  # Empty raster with the template's geometry. The template may be a stitched
+  # multi-band mosaic or a valueless single-layer grid reconstructed for a
+  # reused output, so only subset layers when there is more than one.
+  tmpl <- terra::rast(if (terra::nlyr(template) > 1L) template[[1]] else template)
   message("  rasterizing ", nrow(master), " cell polygons for '", stem, "' ...")
   tmp_fill <- tempfile(tmpdir = out_dir, fileext = ".tif")
   base_mask <- terra::rasterize(master, tmpl, field = "poly_id", background = 0,
@@ -1030,7 +1145,21 @@ gb_check_poly_alignment <- function(fov_positions, polygons,
 #'   applied only if the JVM has not already started in the session and you have
 #'   not set \code{options(java.parameters)} yourself; otherwise set that option
 #'   before loading any package. The JVM heap cannot be resized once started.
-#' @param overwrite Overwrite existing outputs. Default \code{TRUE}.
+#' @param overwrite Default \code{FALSE}, which enables \strong{reuse}: if the
+#'   IF OME-TIFF(s) this call would write are already in \code{out_dir}, no
+#'   morphology TIFF is opened and no stitching is done. The output grid is
+#'   reconstructed from the FOV positions files instead, its dimensions are
+#'   checked against the existing file, and the remaining products -- cell
+#'   polygons and the H&E OME-TIFF -- are built on that grid. This lets you
+#'   iterate on polygons, or add H&E later, without repeating the expensive
+#'   stitch. Polygon outputs (\code{*_polygons.tif}/\code{.csv}) are always
+#'   rewritten, since they are the cheap part and usually the reason for the
+#'   re-run. In per-slide mode reuse is decided slide by slide, so only the
+#'   missing slides are stitched. When \code{stitch_slides = TRUE} and the
+#'   combined image does not exist yet, any per-slide \code{<slide>.ome.tif}
+#'   left by an earlier per-slide run is read back and fed straight into the
+#'   mosaic, so switching a finished per-slide run to a combined one costs a
+#'   merge rather than a full re-stitch. \code{TRUE} rebuilds everything.
 #'
 #' @return (Invisibly) a character vector of the OME-TIFF paths written.
 #'
@@ -1109,7 +1238,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
                                    max_vsize          = NULL,
                                    java_heap          = NULL,
                                    keep_intermediate  = FALSE,
-                                   overwrite          = TRUE) {
+                                   overwrite          = FALSE) {
 
   backend <- match.arg(backend)
   metadata_injector <- match.arg(metadata_injector)
@@ -1273,7 +1402,13 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   # Minerva-readable either way.
   write_if_ome <- function(rast, stem, eff_um, channels_df) {
     ome_tif <- file.path(out_dir, paste0(stem, ".ome.tif"))
-    if (file.exists(ome_tif) && !overwrite) stop("Exists (overwrite=FALSE): ", ome_tif)
+    if (file.exists(ome_tif) && !overwrite) {
+      message("  reusing existing ", basename(ome_tif), " (overwrite = FALSE)")
+      return(ome_tif)
+    }
+    if (is.null(channels_df))
+      stop("Channel metadata could not be resolved because no stitched image ",
+           "was loaded in this run. Re-run with overwrite = TRUE.", call. = FALSE)
 
     plain <- file.path(out_dir, paste0(stem, ".tif"))
     message("  writing intermediate ", basename(plain), " ...")
@@ -1367,7 +1502,10 @@ stitch_fovs_to_ometiff <- function(fov_positions,
   # ---- helper: resample an H&E raster onto an IF grid and write RGB OME ------
   write_he_ome <- function(he_rast, grid_rast, stem, eff_um) {
     ome_tif <- file.path(out_dir, paste0(stem, ".ome.tif"))
-    if (file.exists(ome_tif) && !overwrite) stop("Exists (overwrite=FALSE): ", ome_tif)
+    if (file.exists(ome_tif) && !overwrite) {
+      message("  reusing existing ", basename(ome_tif), " (overwrite = FALSE)")
+      return(ome_tif)
+    }
     message("  resampling H&E onto the IF grid (", he_resample_method, ")...")
     tmp <- tempfile(tmpdir = out_dir, fileext = ".tif")
     he_r <- terra::resample(he_rast, grid_rast, method = he_resample_method,
@@ -1401,26 +1539,87 @@ stitch_fovs_to_ometiff <- function(fov_positions,
     r
   }
 
-  # ---- Stage 1: per-slide IF (and H&E) rasters ------------------------------
-  if_list <- vector("list", n_slides)
-  he_list <- if (!is.null(he_images)) vector("list", n_slides) else NULL
-  for (s in seq_len(n_slides)) {
-    message("\n=== Slide '", slide_names[s], "' (", s, "/", n_slides, ") ===")
-    if_list[[s]] <- .gb_merge_slide(fov_positions[[s]], image_dir[[s]],
-                                    pixel_size_um, fov_size_px,
-                                    downsample_factor, out_dir)
-    if (!is.null(he_images)) he_list[[s]] <- load_he(he_images[[s]], if_list[[s]])
-  }
-  channels_df <- .gb_resolve_channels(channels, terra::nlyr(if_list[[1]]))
-  eff_um      <- pixel_size_um * downsample_factor
-  written     <- character(0)
-
-  do_combine <- isTRUE(stitch_slides) && n_slides > 1L
+  # ---- where should each slide's pixels come from? --------------------------
+  # Worked out before any pixels are touched. Three possible sources per slide:
+  #   "stitch"    - read the morphology TIFFs (the expensive path)
+  #   "slide-tif" - read back the per-slide IF OME-TIFF an earlier run wrote,
+  #                 which holds exactly the mosaic the combine step needs
+  #   "grid"      - geometry only; the output we would write already exists, so
+  #                 no pixels are needed at all
+  do_combine   <- isTRUE(stitch_slides) && n_slides > 1L
+  combine_mode <- do_combine || (isTRUE(stitch_slides) && combine_downsample > 1L)
   if (isTRUE(stitch_slides) && n_slides == 1L && combine_downsample == 1L)
     message("Only one slide and combine_downsample = 1: nothing to combine.")
 
+  slide_tifs <- file.path(out_dir, paste0(slide_names, ".ome.tif"))
+  if_targets <- if (combine_mode)
+    file.path(out_dir, paste0(combine_name, ".ome.tif")) else slide_tifs
+
+  slide_src <- rep("stitch", n_slides)
+  if (!overwrite) {
+    if (combine_mode) {
+      if (file.exists(if_targets[1])) {
+        slide_src[] <- "grid"
+      } else {
+        # No combined image yet, but a previous per-slide run may have left the
+        # mosaics on disk; reuse those rather than re-reading every FOV.
+        slide_src <- ifelse(file.exists(slide_tifs), "slide-tif", "stitch")
+      }
+    } else {
+      slide_src <- ifelse(file.exists(slide_tifs), "grid", "stitch")
+    }
+  }
+  if (all(slide_src == "grid"))
+    message("\nThe IF OME-TIFF(s) are already in '", out_dir, "' and ",
+            "overwrite = FALSE: reusing them, reconstructing the output grid ",
+            "from the FOV positions, and skipping the stitch. Polygon and H&E ",
+            "outputs will still be produced.")
+  else if (any(slide_src == "slide-tif"))
+    message("\nBuilding '", combine_name, ".ome.tif' from ",
+            sum(slide_src == "slide-tif"), " existing per-slide OME-TIFF(s)",
+            if (any(slide_src == "stitch"))
+              paste0(" and stitching ", sum(slide_src == "stitch"), " more")
+            else "", ".")
+
+  # ---- Stage 1: per-slide IF (and H&E) rasters ------------------------------
+  if_list <- vector("list", n_slides)
+  for (s in seq_len(n_slides)) {
+    message("\n=== Slide '", slide_names[s], "' (", s, "/", n_slides, ") ===")
+    if (slide_src[s] == "stitch") {
+      if_list[[s]] <- .gb_merge_slide(fov_positions[[s]], image_dir[[s]],
+                                      pixel_size_um, fov_size_px,
+                                      downsample_factor, out_dir)
+    } else {
+      grid <- .gb_slide_grid(fov_positions[[s]], image_dir[[s]],
+                             pixel_size_um, fov_size_px, downsample_factor)
+      if (slide_src[s] == "slide-tif") {
+        if_list[[s]] <- .gb_load_slide_ome(slide_tifs[s], grid, slide_names[s])
+      } else {
+        if_list[[s]] <- grid
+        if (!combine_mode) .gb_verify_grid(grid, if_targets[s])
+      }
+    }
+  }
+  have_pixels <- any(slide_src != "grid")
+
+  he_list <- NULL
+  if (!is.null(he_images)) {
+    he_list <- vector("list", n_slides)
+    for (s in seq_len(n_slides))
+      he_list[[s]] <- load_he(he_images[[s]], if_list[[s]])
+  }
+
+  # Channel metadata is only needed when an IF file is actually written; a
+  # "grid" entry carries no bands, so take the count from one that does.
+  nlyr_if <- if (have_pixels)
+    terra::nlyr(if_list[[which(slide_src != "grid")[1]]]) else NA_integer_
+  channels_df <- if (is.na(nlyr_if)) NULL else
+    .gb_resolve_channels(channels, nlyr_if)
+  eff_um  <- pixel_size_um * downsample_factor
+  written <- character(0)
+
   # ---- Stage 2a: combined output --------------------------------------------
-  if (do_combine || (isTRUE(stitch_slides) && combine_downsample > 1L)) {
+  if (combine_mode) {
     lay <- .gb_resolve_layout(n_slides, slide_layout)
     message("\nCombining ", n_slides, " slide(s) on a ", lay[1], " x ", lay[2],
             " grid (extra downsample x", combine_downsample, ")...")
@@ -1428,13 +1627,21 @@ stitch_fovs_to_ometiff <- function(fov_positions,
 
     shifted_if <- lapply(seq_len(n_slides), function(k)
       terra::shift(if_list[[k]], dx = off$dx[k], dy = off$dy[k]))
-    tmp1 <- tempfile(tmpdir = out_dir, fileext = ".tif")
-    merged_if <- terra::merge(terra::sprc(shifted_if), filename = tmp1,
-                              datatype = "INT2U", NAflag = 0, overwrite = TRUE)
-    if (combine_downsample > 1L) {
-      tmp2 <- tempfile(tmpdir = out_dir, fileext = ".tif")
-      merged_if <- terra::aggregate(merged_if, fact = combine_downsample,
-                                    fun = "mean", filename = tmp2, NAflag = 0)
+    tmp1 <- tmp2 <- NULL
+    if (have_pixels) {
+      tmp1 <- tempfile(tmpdir = out_dir, fileext = ".tif")
+      merged_if <- terra::merge(terra::sprc(shifted_if), filename = tmp1,
+                                datatype = "INT2U", NAflag = 0, overwrite = TRUE)
+      if (combine_downsample > 1L) {
+        tmp2 <- tempfile(tmpdir = out_dir, fileext = ".tif")
+        merged_if <- terra::aggregate(merged_if, fact = combine_downsample,
+                                      fun = "mean", filename = tmp2, NAflag = 0)
+      }
+    } else {
+      # Same geometry terra::merge() + aggregate() would give, but with no
+      # pixels: enough to place polygons and to resample H&E onto.
+      merged_if <- .gb_agg_grid(.gb_union_grid(shifted_if), combine_downsample)
+      .gb_verify_grid(merged_if, if_targets[1])
     }
     eff_um_c <- eff_um * combine_downsample
     written <- c(written, write_if_ome(merged_if, combine_name, eff_um_c, channels_df))
@@ -1472,8 +1679,10 @@ stitch_fovs_to_ometiff <- function(fov_positions,
       }
     }
 
-    unlink(c(tmp1, if (exists("tmp2")) tmp2 else NULL))
-    for (r in if_list) unlink(attr(r, "gb_tmp"))
+    unlink(c(tmp1, tmp2))
+    for (r in if_list) {
+      tf <- attr(r, "gb_tmp"); if (!is.null(tf)) unlink(tf)
+    }
     return(invisible(written))
   }
 
@@ -1490,7 +1699,7 @@ stitch_fovs_to_ometiff <- function(fov_positions,
         stats::setNames(list(c(0, 0)), stem), out_dir, stem, pixel_size_um,
         fov_size_px, poly_coord_units, poly_flip_y, poly_x_offset_px,
         poly_y_off, poly_border_value, poly_border_label))
-    unlink(attr(if_list[[s]], "gb_tmp"))
+    tf <- attr(if_list[[s]], "gb_tmp"); if (!is.null(tf)) unlink(tf)
   }
   invisible(written)
 }
@@ -1570,8 +1779,10 @@ if (sys.nframe() == 0) {
       help = "FOV-id column, used by poly_align = 'auto' [default= %default]"),
     optparse::make_option(c("-k", "--keep_intermediate"), action = "store_true", default = FALSE,
       help = "Keep intermediate .tif/.xml (and per-slide polygons) [default= %default]"),
-    optparse::make_option(c("--no_overwrite"), action = "store_true", default = FALSE,
-      help = "Do not overwrite existing outputs.")
+    optparse::make_option(c("--overwrite"), action = "store_true", default = FALSE,
+      help = paste("Rebuild everything. Without this flag, an IF OME-TIFF",
+                   "already present in --out_dir is reused and only the",
+                   "polygons/H&E are (re)generated [default= %default]"))
   )
   opt <- optparse::parse_args(optparse::OptionParser(option_list = option_list))
   if (is.null(opt$fov_positions) || is.null(opt$image_dir)) {
@@ -1617,6 +1828,6 @@ if (sys.nframe() == 0) {
     max_vsize          = opt$max_vsize,
     java_heap          = opt$java_heap,
     keep_intermediate  = opt$keep_intermediate,
-    overwrite          = !opt$no_overwrite
+    overwrite          = opt$overwrite
   )
 }
