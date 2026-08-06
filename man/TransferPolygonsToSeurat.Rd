@@ -8,6 +8,9 @@ TransferPolygonsToSeurat(
   polys,
   seurat_object,
   slide_col = "slide",
+  cell_col = NULL,
+  x_col = NULL,
+  y_col = NULL,
   assay = "RNA",
   invert_x = FALSE,
   invert_y = TRUE,
@@ -18,17 +21,28 @@ TransferPolygonsToSeurat(
 )
 }
 \arguments{
-\item{polys}{A list with one element per FOV. Each FOV element is itself a \emph{named} list
-with one element per cell (the names must be the cell IDs that match
-\code{colnames(seurat_object)}), and each cell element is a matrix or data.frame whose
-first two columns are the x and y vertex coordinates of that cell's polygon.}
+\item{polys}{Polygon source(s). One of: a nested per-FOV list; a flat
+\code{data.frame}/\code{data.table}; a character vector of one or more file paths
+(\code{.rds}/\code{.RDS} or \code{.csv(.gz)}/\code{.tsv}); or a list of such sources. When
+several sources are supplied their vertices are combined. See Details above.}
 
 \item{seurat_object}{A Seurat object to attach the segmentation FOV(s) to.}
 
-\item{slide_col}{Name of the metadata column that groups cells into slides. One FOV slot
-is created per unique value of this column, named by that value (this mirrors the
-original per-slide loop). If \code{NULL}, all cells are placed into a single FOV named
-\code{fov_name}. Defaults to "slide".}
+\item{slide_col}{Name of the \emph{Seurat metadata} column that groups cells into slides. One
+FOV slot is created per unique value of this column, named by that value. If \code{NULL}, all
+cells are placed into a single FOV named \code{fov_name}. Defaults to "slide". (This concerns
+the Seurat object's metadata and is unrelated to any column in a flat polygon table.)}
+
+\item{cell_col}{For \strong{flat-table} input only: name of the column holding cell IDs (these
+must match \code{colnames(seurat_object)}). If \code{NULL} (default) it is auto-detected from
+common CosMx names (\code{cell}, \code{cell_ID}, \code{cellID}, ...) by choosing whichever
+column overlaps most with \code{colnames(seurat_object)}.}
+
+\item{x_col, y_col}{For \strong{flat-table} input only: names of the x / y coordinate columns. If
+\code{NULL} (default) they are auto-detected, preferring a continuous whole-slide coordinate
+pair in this order: \code{x_global_px}/\code{y_global_px}, then \code{x_slide_mm}/\code{y_slide_mm},
+then \code{x_local_px}/\code{y_local_px}, then \code{x}/\code{y}. Note that local (per-FOV) pixel
+coordinates reset in every FOV and will overlap if combined, so a global/slide pair is preferred.}
 
 \item{assay}{Assay name passed to \code{CreateFOV}. Defaults to "RNA".}
 
@@ -37,9 +51,12 @@ original per-slide loop). If \code{NULL}, all cells are placed into a single FOV
 \item{invert_y}{Logical; if TRUE the y coordinates are multiplied by -1. FastReSeg's y-axis
 usually needs inverting to match the Seurat object's orientation, so defaults to TRUE.}
 
-\item{divide_by_1000}{Logical; if TRUE the coordinates are divided by 1000. Use this when
-the polygon coordinates are in microns while the Seurat object stores coordinates in
-millimeters (the usual CosMx case). Defaults to TRUE.}
+\item{divide_by_1000}{Logical; if TRUE the coordinates are divided by 1000. Use this when the
+polygon coordinates are in microns while the Seurat object stores coordinates in millimeters
+(the usual CosMx case). Defaults to TRUE. \strong{Units caveat for flat tables:} if you select
+the \code{*_slide_mm} columns the values are already in mm (set \code{divide_by_1000 = FALSE});
+raw pixel columns are \emph{not} microns, so \code{/1000} will not convert them to mm - check
+the coordinate range printed by \code{verbose} and set the transform flags accordingly.}
 
 \item{boundary}{Name of the segmentation boundary / FOV type. Defaults to "segmentation".}
 
@@ -48,11 +65,34 @@ millimeters (the usual CosMx case). Defaults to TRUE.}
 \item{verbose}{Logical; print progress / coverage messages. Defaults to TRUE.}
 }
 \value{
-The Seurat object with one segmentation FOV added per slide (returned invisibly-free
-so it can be reassigned, e.g. \code{obj <- TransferPolygonsToSeurat(polys, obj)}).
+The Seurat object with one segmentation FOV added per slide.
 }
 \description{
-Converts a nested list of per-FOV, per-cell polygon vertex matrices (as produced by
-FastReSeg) into Seurat \code{Segmentation}/\code{FOV} objects and attaches them to a
-Seurat object, creating one FOV slot per slide.
+Converts polygon vertex coordinates into Seurat \code{Segmentation}/\code{FOV} objects and
+attaches them to a Seurat object, creating one FOV slot per slide.
+}
+\details{
+The \code{polys} argument now accepts several forms (all describing the same underlying
+polygon vertices):
+\enumerate{
+\item \strong{Nested list} (the original format): a list with one element per FOV; each FOV
+element is a \emph{named} list (names = cell IDs) whose elements are matrices/data.frames whose
+first two columns are the x and y vertex coordinates of that cell's polygon.
+\item \strong{Flat table}: a \code{data.frame} / \code{data.table} in long format, one vertex
+per row, with columns for the cell ID and the x / y coordinates (e.g. a CosMx
+\code{*-polygons} table with \code{cell}, \code{x_global_px}, \code{y_global_px}, ...).
+\item \strong{File path(s)}: a character vector of one \emph{or more} paths, each pointing to
+\itemize{
+\item an \code{.rds}/\code{.RDS} file (read with \code{readRDS()}; may contain either a
+nested list or a flat table), or
+\item a delimited text file - \code{.csv}, \code{.csv.gz}, \code{.tsv}, \code{.txt},
+or \code{.gz} - read as a flat table.
+}
+When more than one path is given (e.g. one polygon file per slide), every file is read and
+the vertices are pooled; each slide's polygons are then routed to the correct FOV by matching
+cell IDs, so you do \emph{not} need to state which file belongs to which slide. Files may mix
+formats (RDS + csv.gz) but should share the same column schema / coordinate units.
+\item \strong{List of sources}: a list whose elements are any mix of the above file paths and/or
+in-memory flat tables (equivalent to passing a character vector of paths).
+}
 }
