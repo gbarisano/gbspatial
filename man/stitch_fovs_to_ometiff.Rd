@@ -42,7 +42,7 @@ stitch_fovs_to_ometiff(
   max_vsize = NULL,
   java_heap = NULL,
   keep_intermediate = FALSE,
-  overwrite = TRUE
+  overwrite = FALSE
 )
 }
 \arguments{
@@ -198,7 +198,21 @@ before loading any package. The JVM heap cannot be resized once started.}
 \item{keep_intermediate}{Keep intermediate plain \code{.tif}/\code{.xml}.
 Default \code{FALSE}.}
 
-\item{overwrite}{Overwrite existing outputs. Default \code{TRUE}.}
+\item{overwrite}{Default \code{FALSE}, which enables \strong{reuse}: if the
+IF OME-TIFF(s) this call would write are already in \code{out_dir}, no
+morphology TIFF is opened and no stitching is done. The output grid is
+reconstructed from the FOV positions files instead, its dimensions are
+checked against the existing file, and the remaining products -- cell
+polygons and the H&E OME-TIFF -- are built on that grid. This lets you
+iterate on polygons, or add H&E later, without repeating the expensive
+stitch. Polygon outputs (\code{*_polygons.tif}/\code{.csv}) are always
+rewritten, since they are the cheap part and usually the reason for the
+re-run. In per-slide mode reuse is decided slide by slide, so only the
+missing slides are stitched. When \code{stitch_slides = TRUE} and the
+combined image does not exist yet, any per-slide \code{<slide>.ome.tif}
+left by an earlier per-slide run is read back and fed straight into the
+mosaic, so switching a finished per-slide run to a combined one costs a
+merge rather than a full re-stitch. \code{TRUE} rebuilds everything.}
 }
 \value{
 (Invisibly) a character vector of the OME-TIFF paths written.
