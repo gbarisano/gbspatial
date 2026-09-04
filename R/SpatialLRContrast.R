@@ -164,6 +164,54 @@
   tryCatch(thunk(), error = function(e) NULL)
 }
 
+#' Map fun() over 1:n across up to n_cores forked workers under a per-call
+#' wall-clock budget. A worker exceeding `timeout` seconds is SIGKILLed and its
+#' index recorded in `killed`; the pool is refilled so it stays n_cores wide.
+#' This is the only mechanism that reliably stops a hung compiled (TMB) fit, and
+#' it lives at the sweep level so there is no nested forking. Unix only.
+#' @noRd
+.lr_pmap_timeout <- function(n, fun, timeout, n_cores, poll = 0.2, on_tick = NULL) {
+  results <- vector("list", n)
+  killed  <- integer(0)
+  pending <- seq_len(n)
+  running <- list()                 # keyed by pid: list(k=, t0=, job=)
+  done    <- 0L
+  no_to   <- is.null(timeout) || !is.finite(timeout) || timeout <= 0
+  while (length(pending) || length(running)) {
+    while (length(running) < n_cores && length(pending)) {
+      k <- pending[[1L]]; pending <- pending[-1L]
+      job <- parallel::mcparallel(fun(k), silent = TRUE)
+      running[[as.character(job$pid)]] <-
+        list(k = k, t0 = proc.time()[["elapsed"]], job = job)
+    }
+    jobs  <- lapply(running, `[[`, "job")
+    ready <- if (length(jobs))
+      parallel::mccollect(jobs, wait = FALSE, timeout = poll) else NULL
+    if (length(ready)) {
+      for (pid in names(ready)) {
+        info <- running[[pid]]; if (is.null(info)) next
+        val <- ready[[pid]]; if (inherits(val, "try-error")) val <- NULL
+        results[[info$k]] <- val
+        running[[pid]] <- NULL; done <- done + 1L
+      }
+    }
+    if (!no_to && length(running)) {
+      now <- proc.time()[["elapsed"]]
+      for (pid in names(running)) {
+        info <- running[[pid]]
+        if (now - info$t0 > timeout) {
+          tools::pskill(info$job$pid, tools::SIGKILL)
+          parallel::mccollect(info$job, wait = FALSE)   # reap the killed child
+          killed <- c(killed, info$k)
+          running[[pid]] <- NULL; done <- done + 1L
+        }
+      }
+    }
+    if (!is.null(on_tick)) on_tick(done, n)
+  }
+  list(results = results, killed = killed)
+}
+
 # ------------------------------------------------------------------------------
 # Main function
 # ------------------------------------------------------------------------------
@@ -651,7 +699,7 @@ SpatialLRContrast <- function(object = NULL,
               if (isTRUE(parallel)) sprintf(" (parallel: %d cores)", n_cores) else ""))
 
   # fit one combination k for the current contrast (returns a 1-row df or NULL)
-  fit_group <- function(k, disease, ref, blocks_shared, cname) {
+  fit_group <- function(k, disease, ref, blocks_shared, cname, family_pref = family) {
     dat <- perglom[row_groups[[k]], , drop = FALSE]
     dd  <- dat[dat$group %in% c(disease, ref) & dat$contacts > 0, , drop = FALSE]
     if (has_block && isTRUE(match_blocks))
@@ -666,7 +714,9 @@ SpatialLRContrast <- function(object = NULL,
     }
     r <- .lr_fit_one(dat, disease = disease, ref = ref, blocks_shared = blocks_shared,
                      has_block = has_block, has_patient = has_patient,
-                     use_offset = use_offset, family_pref = family)
+                     use_offset = use_offset, family_pref = family_pref,
+                     fit_timeout = if (isTRUE(parallel)) NULL else fit_timeout,
+                     use_fork    = !isTRUE(parallel))
     if (is.null(r)) return(NULL)
     cbind(data.frame(contrast = cname, stringsAsFactors = FALSE),
           grp_meta[k, , drop = FALSE], r)
@@ -684,11 +734,38 @@ SpatialLRContrast <- function(object = NULL,
     }
     say("== ", cname, " ==")
 
-    if (isTRUE(parallel) && requireNamespace("parallel", quietly = TRUE)) {
-      res_c <- parallel::mclapply(seq_len(n_groups), fit_group,
-                                  disease = disease, ref = ref,
-                                  blocks_shared = blocks_shared, cname = cname,
-                                  mc.cores = n_cores)
+    if (isTRUE(parallel) && .Platform$OS.type == "unix" &&
+        requireNamespace("parallel", quietly = TRUE)) {
+      t0   <- proc.time()[["elapsed"]]
+      step <- max(1L, n_groups %/% 200L)
+      tick <- if (isTRUE(verbose)) function(done, total) {
+        if (done %% step == 0L || done == total) {
+          el  <- proc.time()[["elapsed"]] - t0; frac <- done / total
+          eta <- if (frac > 0) el * (1 - frac) / frac else NA_real_
+          cat(sprintf("\r  %s  %5.1f%%  (%d/%d)  elapsed %s  ETA %s      ",
+                      cname, 100 * frac, done, total,
+                      .lr_fmt_time(el), .lr_fmt_time(eta)))
+          utils::flush.console()
+        }
+      } else NULL
+
+      sweep <- .lr_pmap_timeout(
+        n = n_groups,
+        fun = function(k) fit_group(k, disease, ref, blocks_shared, cname),
+        timeout = fit_timeout, n_cores = n_cores, on_tick = tick)
+      res_c <- sweep$results
+
+      # A killed worker never reached its Gaussian fallback (the whole process
+      # was killed). Retry only those pairs Gaussian-only, in-process: fast,
+      # cannot hang, and keeps parity with the sequential path.
+      if (length(sweep$killed)) {
+        if (isTRUE(verbose))
+          cat(sprintf("\n  %s  retrying %d timed-out pair(s) Gaussian-only\n",
+                      cname, length(sweep$killed)))
+        for (k in sweep$killed)
+          res_c[[k]] <- fit_group(k, disease, ref, blocks_shared, cname,
+                                  family_pref = "gaussian")
+      } else if (isTRUE(verbose)) cat("\n")
     } else {
       res_c <- vector("list", n_groups)
       t0    <- proc.time()[["elapsed"]]
