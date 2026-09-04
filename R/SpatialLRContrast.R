@@ -72,7 +72,8 @@
 #' Fit one mixed model for a single (interaction, sender, receiver) x contrast
 #' @noRd
 .lr_fit_one <- function(dat, disease, ref, blocks_shared,
-                        has_block, has_patient, use_offset, family_pref) {
+                        has_block, has_patient, use_offset, family_pref,
+                        fit_timeout = 60, use_fork = TRUE) {
 
   d <- dat[dat$group %in% c(disease, ref), , drop = FALSE]
   if (has_block && !is.null(blocks_shared)) {
@@ -100,21 +101,20 @@
   fam <- NA_character_; m <- NULL
   if (identical(family_pref, "tweedie")) {
     form <- stats::as.formula(paste0("score ~ ", fixed, reff, offs))
-    # suppressWarnings (not a warning handler): a convergence warning should not
-    # abort the fit -- doing so also trips glmmTMB's internal system.time and
-    # prints "Timing stopped at:". We judge convergence from pdHess below.
-    m <- tryCatch(suppressWarnings(glmmTMB::glmmTMB(form, data = d,
-                                   family = glmmTMB::tweedie(link = "log"))),
-                  error = function(e) NULL)
+    m <- .lr_eval_timeout(function()
+           suppressWarnings(glmmTMB::glmmTMB(form, data = d,
+                            family = glmmTMB::tweedie(link = "log"))),
+         timeout = fit_timeout, use_fork = use_fork)
     fam <- "tweedie"
     ok <- !is.null(m) && isTRUE(tryCatch(m$sdr$pdHess, error = function(e) FALSE))
     if (!ok) m <- NULL
   }
-  if (is.null(m)) {   # Gaussian(log1p) fallback (or primary if family_pref == "gaussian")
+  if (is.null(m)) {   # Gaussian(log1p) fallback (also fires on Tweedie timeout)
     d$y <- if (use_offset) log1p(d$score / d$contacts) else log1p(d$score)
     form2 <- stats::as.formula(paste0("y ~ ", fixed, reff))
-    m <- tryCatch(suppressWarnings(glmmTMB::glmmTMB(form2, data = d)),
-                  error = function(e) NULL)
+    m <- .lr_eval_timeout(function()
+           suppressWarnings(glmmTMB::glmmTMB(form2, data = d)),
+         timeout = fit_timeout, use_fork = use_fork)
     fam <- "gaussian_log1p"
     if (is.null(m)) return(NULL)
   }
@@ -132,6 +132,36 @@
     n_glom_ref     = as.integer(ng[ref]),
     stringsAsFactors = FALSE
   )
+}
+
+#' Evaluate a fitting thunk under a hard wall-clock budget.
+#'
+#' A single degenerate glmmTMB fit (typically Tweedie) can spin far longer than
+#' any other and stall the whole sweep. In-process limits do not help: an
+#' iteration cap bounds only the outer optimiser, not sdreport()/Hessian
+#' assembly, and setTimeLimit()/withTimeout() cannot interrupt a single long
+#' compiled (TMB) call. On Unix we run the fit in a forked child and SIGKILL it
+#' if it overruns; elsewhere we fall back to setTimeLimit(). Returns the fit, or
+#' NULL on timeout/error (so the caller's Gaussian fallback still fires).
+#' @noRd
+.lr_eval_timeout <- function(thunk, timeout, use_fork = TRUE) {
+  if (is.null(timeout) || !is.finite(timeout) || timeout <= 0) return(thunk())
+  if (use_fork && .Platform$OS.type == "unix" &&
+      requireNamespace("parallel", quietly = TRUE)) {
+    job <- parallel::mcparallel(thunk(), silent = TRUE)
+    ans <- parallel::mccollect(job, wait = FALSE, timeout = timeout)
+    if (is.null(ans)) {                          # overran the budget
+      tools::pskill(job$pid, tools::SIGKILL)
+      parallel::mccollect(job, wait = FALSE)     # reap the killed child
+      return(NULL)
+    }
+    out <- ans[[1L]]
+    if (inherits(out, "try-error")) return(NULL)
+    return(out)
+  }
+  setTimeLimit(elapsed = timeout, transient = TRUE)
+  on.exit(setTimeLimit(elapsed = Inf, transient = TRUE), add = TRUE)
+  tryCatch(thunk(), error = function(e) NULL)
 }
 
 # ------------------------------------------------------------------------------
@@ -294,6 +324,11 @@
 #' @param seed RNG seed for reproducibility of any stochastic model internals.
 #'   Default 1.
 #' @param verbose Print progress messages. Default \code{TRUE}.
+#' @param fit_timeout Per-fit wall-clock budget, in seconds. A single degenerate
+#'   Tweedie fit can hang indefinitely (usually in the Hessian/SE step) and stall
+#'   the whole sweep; if a fit exceeds this budget it is abandoned (on Unix the
+#'   worker process is killed) and the Gaussian-log1p fallback is used for that
+#'   pair. \code{NULL} or \code{0} disables the guard. Default 60.           
 #'
 #' @return A list with:
 #'   \describe{
@@ -385,7 +420,7 @@ SpatialLRContrast <- function(object = NULL,
                               padj_method = "BH",
                               parallel = FALSE, n_cores = 1,
                               outdir = NULL, make_volcano = TRUE,
-                              seed = 1, verbose = TRUE) {
+                              seed = 1, verbose = TRUE, fit_timeout = 60) {
 
   prevalence <- match.arg(prevalence)
   scoring    <- match.arg(scoring)
