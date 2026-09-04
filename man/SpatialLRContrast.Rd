@@ -42,7 +42,8 @@ SpatialLRContrast(
   outdir = NULL,
   make_volcano = TRUE,
   seed = 1,
-  verbose = TRUE
+  verbose = TRUE,
+  fit_timeout = 60
 )
 }
 \arguments{
@@ -173,6 +174,12 @@ set).}
 Default 1.}
 
 \item{verbose}{Print progress messages. Default \code{TRUE}.}
+
+\item{fit_timeout}{Per-fit wall-clock budget, in seconds. A single degenerate
+Tweedie fit can hang indefinitely (usually in the Hessian/SE step) and stall
+the whole sweep; if a fit exceeds this budget it is abandoned (on Unix the
+worker process is killed) and the Gaussian-log1p fallback is used for that
+pair. \code{NULL} or \code{0} disables the guard. Default 60.}
 }
 \value{
 A list with:
